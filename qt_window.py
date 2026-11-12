@@ -6,10 +6,11 @@ mouse movement never causes catalog re-population or wallpaper rescaling.
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QSize, QRectF, QRect, QPoint, QPointF, Signal, Slot, QObject, QThread, QSignalBlocker
-from PySide6.QtGui import QColor, QPainter, QPen, QFont, QFontMetrics, QPolygonF, QPixmap, QIcon, QPainterPath, QLinearGradient, QBrush, QRadialGradient
+from PySide6.QtCore import Qt, QTimer, QSize, QRectF, QRect, QPoint, QPointF, Signal, Slot, QObject, QThread, QSignalBlocker, QUrl
+from PySide6.QtGui import QColor, QPainter, QPen, QFont, QFontMetrics, QPolygonF, QPixmap, QIcon, QPainterPath, QLinearGradient, QBrush, QRadialGradient, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QLabel, QPushButton, QLineEdit,
     QSpinBox, QComboBox, QCheckBox, QTreeWidget, QTreeWidgetItem, QTableWidget,
@@ -24,8 +25,10 @@ from game_art import ASSETS, GameArt
 from edit_changes import EditChanges
 from qt_first_launch import FirstLaunchPage
 from qt_errors import error_text
-VERSION = "0.1.0"
+from save_storage import SteamSaveStorage
+VERSION = "0.2.0"
 APP_NAME = "Cold Steel I Inventory Editor"
+SAVE_FILTER = "Cold Steel I (*.dat *.bak)"
 
 
 from qt_hud_widgets import (hud_icon, HudButton, Backdrop, GlassPanel, AngularTab,
@@ -113,7 +116,7 @@ class ScanWorker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self,core=None):
         super().__init__()
-        self.core=core if core is not None else EditorCore()
+        self.core=core if core is not None else EditorCore(storage=SteamSaveStorage())
         self.setWindowTitle(f'{APP_NAME} v{VERSION}')
         self.art = GameArt()
         self.setWindowIcon(self.art.menu_icon('inventory'))
@@ -311,9 +314,10 @@ class MainWindow(QMainWindow):
         self.footer_aux=glass_label('','muted',10)
         fl.addWidget(self.footer,1);fl.addWidget(self.footer_aux)
         self.help_button=add_button('',lambda:self.show_report(self.msg('Клавиши и работа с редактором','Editor help'),[
-            'F5 — '+self.msg('учебный инвентарь','sample inventory'),
+            'F5 — '+(self.msg('последнее сохранение','latest save') if self.core.storage else
+                       self.msg('учебный инвентарь','sample inventory')),
             'Ctrl+O — '+self.msg('диалог открытия','open dialog'),
-            'Ctrl+S — '+self.msg('предпросмотр сохранения копии','preview saving a copy'),
+            'Ctrl+S — '+self.msg('сохранить копию','save a copy'),
             'Ctrl+Z — '+self.msg('отменить изменение','undo edit'),
             'Ctrl+F — '+self.msg('поиск в каталоге','catalog search'),
             self.msg('Правый клик по количеству — 1 / 10 / 50 / 99.','Right-click quantity for 1 / 10 / 50 / 99.'),
@@ -461,7 +465,8 @@ class MainWindow(QMainWindow):
         scroll.setObjectName('toolsScroller');scroll.viewport().setAutoFillBackground(False)
         inside=QWidget();inside.setObjectName('toolsInner');grid=QGridLayout(inside);grid.setSpacing(12)
         specs=[
-          ('Сохранения', [('Учебный инвентарь',self.load_latest),('Открыть вручную',self.open_save_dialog),
+          ('Сохранения', [('Последнее сохранение' if self.core.storage else 'Учебный инвентарь',self.load_latest),
+             ('Открыть вручную',self.open_save_dialog),
              ('Папка сохранений',self.open_save_dir),('Просмотр правок',self.show_changes),('Сравнить два файла',self.compare_dialog)]),
           ('Игра и DLC',[('Сканировать папку игры',self.choose_game),('Автопоиск игры',lambda:self.scan_game(None)),('Начало работы',self.show_startup)]),
           ('Каталог и диагностика',[('Импорт английского каталога',self.import_english_dialog),('Отчёт: отсутствующие переводы',self.translation_report),
@@ -588,11 +593,10 @@ class MainWindow(QMainWindow):
         self.show_section('catalog')
 
     def open_save_from_startup(self):
-        previous=self.core.save
-        self.load_latest()
-        if self.core.save is not None and self.core.save is not previous:
-            self._startup_forced=False;self._startup_dismissed=False
-            self.show_section('inventory')
+        if self.core.storage:
+            self.open_save_dialog()
+        else:
+            self.load_latest()
 
     def refresh_startup(self,catalog_count=None):
         if not hasattr(self,'startup_page'):return
@@ -600,8 +604,10 @@ class MainWindow(QMainWindow):
         section=getattr(self,'current_section','catalog')
         needed=not count or self.core.save is None
         showing=section!='tools' and not self._startup_dismissed and (needed or self._startup_forced)
-        self.startup_page.render_state(language=self.language,catalog_count=count,
-            save_name=self.msg('Учебный инвентарь','Sample inventory') if self.core.save else '',busy=self._scan_busy,
+        source = self.core.source
+        save_name = source.name if source else self.msg('Учебный инвентарь','Sample inventory') if self.core.save else ''
+        self.startup_page.render_state(language=self.language,catalog_count=count, demo=self.core.storage is None,
+            save_name=save_name,busy=self._scan_busy,
             stage=self._scan_stage,error=self._scan_error,error_details=error_text(self._scan_error_details,self.language),
             warning_count=self._scan_warning_count)
         self.pages.setCurrentWidget(self.startup_page if showing else {'catalog':self.catpage,'inventory':self.invpage,'tools':self.toolspage}[section])
@@ -609,8 +615,7 @@ class MainWindow(QMainWindow):
         self.detail_shell.setVisible(section!='tools' and not showing)
         self.detail.setVisible(section!='tools' and not showing)
         if showing:
-            self.footer.setText(self.msg('Начало работы · Каталог → Образец → Редактор',
-                                         'Getting started · Catalog → Sample → Editor'))
+            self.footer.setText(self.msg('Начало работы', 'Getting started'))
 
     def show_section(self,section):
         self.current_section=section
@@ -654,7 +659,8 @@ class MainWindow(QMainWindow):
         self.tabcat.setText(t('Каталог предметов','Item catalog'));self.tabinv.setText(t('Мой инвентарь','My inventory'))
         self.cat_search.setPlaceholderText(t('Поиск по названию, ID или описанию…','Search by name, ID or description…'))
         self.inv_search.setPlaceholderText(t('Поиск по названию, ID или описанию…','Search by name, ID or description…'))
-        self.inventory_hint.setText(t('Предметы в учебном инвентаре','Items in the sample inventory'))
+        self.inventory_hint.setText(t('Предметы в загруженном сохранении','Items in the opened save') if self.core.storage else
+                                    t('Предметы в учебном инвентаре','Items in the sample inventory'))
         self.missing.setText(t('Показывать только отсутствующие','Show missing only'))
         self.present.setText(t('Только имеющиеся','Owned only'))
         self.filter_button.setText(t('Фильтры ▾','Filters ▾'))
@@ -683,7 +689,9 @@ class MainWindow(QMainWindow):
         self.favorite_btn.setToolTip(t('Добавить или убрать из избранного','Add or remove favorite'))
         self.description_title.setText(t('Описание и характеристики','Description & details'))
         self.qty_preset_caption.setText(t('БЫСТРОЕ КОЛИЧЕСТВО','QUICK QUANTITY'))
-        self.safe_note.setText(t('Правки демонстрационного инвентаря хранятся в памяти.','Sample inventory edits are kept in memory.'))
+        self.safe_note.setText(t('При перезаписи слота редактор создаёт резервную копию.',
+                                 'Overwriting a slot creates a backup.') if self.core.storage else
+                               t('Правки демонстрационного инвентаря хранятся в памяти.','Sample inventory edits are kept in memory.'))
         self.tools_title.setText(t('ИНСТРУМЕНТЫ И ДИАГНОСТИКА','TOOLS & DIAGNOSTICS'))
         if self._scan_busy:
             self.scan_state.setText(t('Загрузка каталога…','Loading the catalog…'))
@@ -720,8 +728,10 @@ class MainWindow(QMainWindow):
         self.inv_tree.setFixedWidth(categories)
         self.actions_layout.setContentsMargins(rail-4,10,16,4)
         widths=(178,182,161,223,185) if compact else (211,219,211,274,223)
+        latest = (('Последнее\nF5','Latest\nF5'), ('Последнее\nсохранение   F5','Latest\nsave   F5')) if self.core.storage else (
+            ('Образец\nF5','Sample\nF5'), ('Учебный\nинвентарь   F5','Sample\ninventory   F5'))
         pairs=(
-          (self.btn_latest,('Образец\nF5','Sample\nF5'),('Учебный\nинвентарь   F5','Sample\ninventory   F5')),
+          (self.btn_latest,*latest),
           (self.btn_open,('Открыть\nCtrl+O','Open\nCtrl+O'),('Открыть вручную\nCtrl+O','Open manually\nCtrl+O')),
           (self.btn_compare,('Сравнить','Compare'),('Сравнить файлы','Compare files')),
           (self.btn_overwrite,('Записать + копия','Backup + save'),('Записать с резервной копией','Save with backup')),
@@ -734,11 +744,12 @@ class MainWindow(QMainWindow):
         for table in (self.cat_table,self.inv_table):table.verticalHeader().setDefaultSectionSize(30)
         self.footer_row.layout().setContentsMargins(rail+8,2,4,0)
         self.qty_caption.setToolTip(self.msg('Допустимое количество: от 0 до 99','Allowed quantity: 0 to 99'))
-        self.btn_latest.setToolTip(self.msg('Загрузить учебный инвентарь (F5)','Load sample inventory (F5)'))
-        self.btn_open.setToolTip(self.msg('Открыть окно загрузки образца (Ctrl+O)','Open sample loading dialog (Ctrl+O)'))
-        self.btn_compare.setToolTip(self.msg('Сравнить правки с исходным образцом','Compare edits with the original sample'))
-        self.btn_overwrite.setToolTip(self.msg('Предпросмотр записи с резервной копией','Preview saving with a backup'))
-        self.btn_savecopy.setToolTip(self.msg('Предпросмотр сохранения копии (Ctrl+S)','Preview saving a copy (Ctrl+S)'))
+        self.btn_latest.setToolTip(self.msg('Открыть последнее сохранение (F5)','Open latest save (F5)') if self.core.storage else
+                                   self.msg('Загрузить учебный инвентарь (F5)','Load sample inventory (F5)'))
+        self.btn_open.setToolTip(self.msg('Открыть сохранение (Ctrl+O)','Open save (Ctrl+O)'))
+        self.btn_compare.setToolTip(self.msg('Сравнить инвентарь с другим файлом','Compare inventory with another file'))
+        self.btn_overwrite.setToolTip(self.msg('Записать с резервной копией','Save with a backup'))
+        self.btn_savecopy.setToolTip(self.msg('Сохранить отдельную копию (Ctrl+S)','Save a separate copy (Ctrl+S)'))
         self.big_icon.setFixedSize(74 if compact else 92,104 if compact else 112)
         self.detail.layout().setSpacing(3 if self.height()<800 else 7)
         self.detail.layout().setContentsMargins(18 if self.height()<800 else 22,10 if self.height()<800 else 15,18 if self.height()<800 else 22,16 if self.height()<800 else 25)
@@ -1069,11 +1080,13 @@ class MainWindow(QMainWindow):
         if iid is None:self.quantity_note.clear();return
         self.edit_changes.refresh(self.core.save)
         current=self.core.quantity(iid);before=self.edit_changes.before.get(iid,0);pending=self.qty.value()
-        if pending!=current:
+        if self.core.is_equipped_master(iid):
+            text=self.msg('Мастер-кварц уже экипирован.','Master quartz is already equipped.')
+        elif pending!=current:
             text=self.msg(f'Сейчас: {current}  →  После применения: {pending}',f'Current: {current}  →  After applying: {pending}')
         elif before!=current:
-            text=self.msg(f'В образце: {before}  →  После правки: {current}',f'Sample: {before}  →  After editing: {current}')
-        else:text=self.msg(f'В образце и редакторе: {current}',f'Original and current: {current}')
+            text=self.msg(f'Исходное: {before}  →  После правки: {current}',f'Original: {before}  →  After editing: {current}')
+        else:text=self.msg(f'В инвентаре: {current}',f'Owned: {current}')
         self.quantity_note.setText(text);self.quantity_note.setToolTip(text)
         self.quantity_note.setProperty('changed',before!=current or pending!=current)
 
@@ -1112,7 +1125,7 @@ class MainWindow(QMainWindow):
             self.core.change(changes)
             self.populate_categories();self.update_tables();self.show_item(self.active_item_id)
             if self.core.save and self.core.save.quantities is not before:
-                self.show_toast('Правки применены к образцу. Их можно просмотреть.', 'Changes applied to the sample. You can review them.')
+                self.show_toast('Правки применены. Их можно просмотреть.', 'Edits applied. You can review them.')
         return self._handle(run)
 
     def apply_single(self):
@@ -1160,22 +1173,44 @@ class MainWindow(QMainWindow):
         return True
 
     def open_save_dialog(self):
+        if self.core.storage:
+            filename, _ = QFileDialog.getOpenFileName(
+                self, self.msg('Открыть сохранение Steam', 'Open a Steam save'),
+                str(self.core.save_directory), SAVE_FILTER,
+            )
+            if filename and self.confirm_dirty():
+                self.open_save(Path(filename))
+            return
         choice = QMessageBox.question(
             self, APP_NAME,
-            self.msg('Открытие игровых файлов будет добавлено позже. Загрузить демонстрационный инвентарь?',
-                     'Opening game files is planned for a later stage. Load the sample inventory?'),
+            self.msg('Загрузить учебный инвентарь заново?', 'Reload the sample inventory?'),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if choice == QMessageBox.StandardButton.Yes:
             self.load_latest()
 
-    def load_latest(self, silent=False):
-        if not silent and not self.confirm_dirty():
+    def open_save(self, path: Path | None = None):
+        source = self._handle(lambda: self.core.open_save(path))
+        if source is None:
+            return False
+        for table in (self.cat_table, self.inv_table):
+            with QSignalBlocker(table):
+                table.clearSelection()
+        self.show_item(None)
+        self.populate_categories()
+        self.navigate_section('inventory')
+        self.show_toast(f'Сохранение открыто: {source.name}', f'Save opened: {source.name}')
+        return True
+
+    def load_latest(self):
+        if not self.confirm_dirty():
+            return
+        if self.core.storage:
+            self.open_save()
             return
         if not self.core.load_demo():
-            if not silent:
-                self.show_toast('Сначала загрузите каталог игры.', 'Load the game catalog first.')
+            self.show_toast('Сначала загрузите каталог игры.', 'Load the game catalog first.')
             return
         self.active_item_id = None
         self.populate_categories()
@@ -1184,22 +1219,58 @@ class MainWindow(QMainWindow):
         self.show_toast('Учебный инвентарь загружен.', 'Sample inventory loaded.')
 
     def save_copy_dialog(self):
-        if self.core.save:
-            self.show_changes('copy')
+        if self.core.save is None or not self.show_changes('copy'):
+            return
+        source = self.core.source
+        if source is None:
+            return
+        preferred = source.with_name(source.stem.split('.dat.', 1)[0] + '_edited.dat')
+        filename, _ = QFileDialog.getSaveFileName(
+            self, self.msg('Сохранить отдельную копию', 'Save a separate copy'), str(preferred), 'Cold Steel I (*.dat)',
+            options=QFileDialog.Option.DontConfirmOverwrite,
+        )
+        if filename:
+            destination = self._handle(lambda: self.core.save_copy(Path(filename)))
+            if destination:
+                self.show_toast(f'Копия сохранена: {destination.name}', f'Copy saved: {destination.name}')
+                self.notice.setToolTip(str(destination))
 
     def overwrite_dialog(self):
-        if self.core.save and self.core.save.changed:
-            self.show_changes('overwrite')
+        if not self.core.save or not self.core.save.changed or not self.show_changes('overwrite'):
+            return
+        if self.core.source is None:
+            return
+        backup = self._handle(self.core.overwrite)
+        if backup:
+            self.update_tables()
+            self.show_item(self.active_item_id)
+            self.show_toast(f'Сохранено. Резервная копия: {backup.name}', f'Saved. Backup: {backup.name}')
+            self.notice.setToolTip(str(backup))
 
     def compare_dialog(self):
         if self.core.save is None:
             return
-        self.edit_changes.refresh(self.core.save)
-        counts = self.edit_changes.counts()
-        added, removed, modified = (counts[key] for key in ('added', 'removed', 'modified'))
+        source = self.core.source
+        if source:
+            filename, _ = QFileDialog.getOpenFileName(
+                self, self.msg('Выбрать файл для сравнения', 'Choose a file to compare'), str(source.parent), SAVE_FILTER,
+            )
+            if not filename:
+                return
+            result = self._handle(lambda: self.core.compare(Path(filename)))
+            if result is None:
+                return
+            added, removed, modified = result
+            heading = self.msg(f'Текущий инвентарь относительно {Path(filename).name}',
+                               f'Current inventory compared with {Path(filename).name}')
+        else:
+            self.edit_changes.refresh(self.core.save)
+            counts = self.edit_changes.counts()
+            added, removed, modified = (counts[key] for key in ('added', 'removed', 'modified'))
+            heading = self.msg('Сравнение с исходным учебным инвентарём.', 'Comparison with the original sample inventory.')
         summary = self.msg(
-            f'Сравнение с исходным учебным инвентарём.\n\nДобавлено: {added}\nУдалено: {removed}\nИзменено: {modified}',
-            f'Comparison with the original sample inventory.\n\nAdded: {added}\nRemoved: {removed}\nModified: {modified}',
+            f'{heading}\n\nДобавлено: {added}\nУдалено: {removed}\nИзменено: {modified}',
+            f'{heading}\n\nAdded: {added}\nRemoved: {removed}\nModified: {modified}',
         )
         QMessageBox.information(self, self.msg('Сравнение инвентаря','Compare inventory'), summary)
 
@@ -1271,8 +1342,10 @@ class MainWindow(QMainWindow):
             self.show_toast(f'Каталог загружен. Предметов: {count}',f'Catalog loaded. Items: {count}')
 
     def open_save_dir(self):
-        self.show_toast('Папка сохранений будет подключена вместе с поддержкой игровых файлов.',
-                        'The save folder will be available when game files are supported.')
+        if self.core.storage and self.core.save_directory.is_dir():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.core.save_directory)))
+        else:
+            self.show_toast('Папка сохранений недоступна.', 'The save directory is unavailable.')
 
     def translation_report(self):
         missing = [f'{item_id}: {name}' for item_id, name in self.core.missing_translations()]
@@ -1317,19 +1390,35 @@ class MainWindow(QMainWindow):
     def refresh_save_labels(self):
         self.edit_changes.refresh(self.core.save)
         loaded = self.core.save is not None
-        self.rail_file.setText(self.msg('Учебный инвентарь','Sample inventory') if loaded else '—')
-        self.rail_folder.setText(self.msg('В памяти','In memory') if loaded else '—')
-        self.rail_date.setText('—')
-        self.rail_state.setText(self.msg('Образец загружен','Sample loaded') if loaded else self.msg('Нет данных','No data'))
-        self.save_line.setText(self.msg('Предпросмотр интерфейса · игровой каталог и учебный инвентарь',
-                                        'Interface preview · game catalog and sample inventory') if loaded else
-                               self.msg('Для начала загрузите каталог игры.', 'Load the game catalog to start.'))
+        source = self.core.source
+        backup = self.core.last_backup
+        if source:
+            self.rail_file.setText(source.name)
+            folder = str(source.parent)
+            self.rail_folder.setText(QFontMetrics(self.rail_folder.font()).elidedText(
+                folder, Qt.TextElideMode.ElideMiddle, max(90, self.rail_panel.width() - 52)))
+            self.rail_folder.setToolTip(folder)
+            stamp = self.core.save.modified_at
+            self.rail_date.setText(datetime.fromtimestamp(stamp).strftime('%d.%m.%Y %H:%M') if stamp else '—')
+            self.rail_state.setText(self.msg('Резервная копия создана','Backup created') if backup else
+                                    self.msg('Файл загружен','File loaded'))
+            self.save_line.setText(self.msg(f'Открыто: {source}', f'Opened: {source}'))
+        else:
+            self.rail_file.setText(self.msg('Учебный инвентарь','Sample inventory') if loaded else '—')
+            self.rail_folder.setText(self.msg('В памяти','In memory') if loaded else '—')
+            self.rail_folder.setToolTip('')
+            self.rail_date.setText('—')
+            self.rail_state.setText(self.msg('Образец загружен','Sample loaded') if loaded else self.msg('Нет данных','No data'))
+            self.save_line.setText(self.msg('Учебный инвентарь · правки в памяти','Sample inventory · edits in memory')
+                                   if loaded else self.msg('Откройте сохранение Steam.', 'Open a Steam save.'))
+        self.rail_state.setToolTip(str(backup) if backup else '')
         if self.core.save and self.core.save.changed:
             state='dirty'
             status=self.msg('● ЕСТЬ ПРАВКИ','● UNSAVED EDITS')
         elif self.core.save:
             state='clean'
-            status=self.msg('ДЕМО · В ПАМЯТИ','DEMO · IN MEMORY')
+            status=(self.msg('РЕЗЕРВНАЯ КОПИЯ СОЗДАНА','BACKUP CREATED') if backup else
+                    self.msg('✓ БЕЗ ИЗМЕНЕНИЙ','✓ NO CHANGES') if source else self.msg('ДЕМО · В ПАМЯТИ','DEMO · IN MEMORY'))
         else:
             state='empty'
             status=self.msg('○ НЕТ ДАННЫХ','○ NO DATA')
@@ -1338,7 +1427,8 @@ class MainWindow(QMainWindow):
             self.dirty_chip.setProperty('state',state)
             self.dirty_chip.style().unpolish(self.dirty_chip)
             self.dirty_chip.style().polish(self.dirty_chip)
-        self.dirty_chip.setToolTip(self.msg('Правки образца хранятся в памяти.', 'Sample edits are kept in memory.'))
+        self.dirty_chip.setToolTip(str(backup) if backup else self.msg('Правки хранятся в памяти до записи.',
+                                                                      'Edits are kept in memory until saved.'))
         visible=self._catalog_view();n=self.core.save.occupied_count if self.core.save else 0
         rows=self.cat_table.rowCount() if getattr(self,'current_section','catalog')=='catalog' else self.inv_table.rowCount()
         favorite_view=self.cat_favorites_only if getattr(self,'current_section','catalog')=='catalog' else self.inv_favorites_only
@@ -1357,7 +1447,8 @@ class MainWindow(QMainWindow):
         self.reset_btn.setEnabled(bool(self.core.save and self.core.save.changed))
         self.btn_compare.setEnabled(self.core.save is not None)
         self.btn_savecopy.setEnabled(self.core.save is not None)
-        self.btn_overwrite.setEnabled(bool(self.core.save and self.core.save.changed))
+        self.btn_overwrite.setEnabled(bool(self.core.save and self.core.save.changed and
+                                           (source is None or source.suffix.lower() == '.dat')))
         self.refresh_startup(len(visible))
 
     def keyPressEvent(self,event):
@@ -1380,6 +1471,7 @@ class MainWindow(QMainWindow):
 
 
 TOOL_EN={
+ 'Последнее сохранение':'Latest save',
  'Учебный инвентарь':'Sample inventory', 'Открыть вручную':'Open manually',
  'Просмотр правок':'Review changes','Папка сохранений':'Save directory','Резервная копия':'Create backup',
  'Сравнить два файла':'Compare saves','Сканировать папку игры':'Scan game folder',

@@ -90,18 +90,22 @@ class FirstLaunchPage(QScrollArea):
         title=QLabel();title.setObjectName('setupCardTitle');row.addWidget(title,1)
         layout.addLayout(row);return title
 
-    def render_state(self,*,language,catalog_count,save_name='',busy=False,stage='',error='',error_details='',warning_count=0):
+    def render_state(self,*,language,catalog_count,demo=True,save_name='',busy=False,stage='',error='',error_details='',warning_count=0):
         t=lambda ru,en:ru if language=='ru' else en
         self.kicker.setText(t('ПЕРВЫЙ ЗАПУСК · COLD STEEL I','GETTING STARTED · COLD STEEL I'))
         self.heading.setText(t('Начнём с двух шагов','Two steps to get started'))
         self.intro.setText(t('Загрузите каталог предметов и откройте учебный инвентарь.',
-                             'Load the item catalog, then open the sample inventory.'))
+                             'Load the item catalog, then open the sample inventory.') if demo else
+                           t('Загрузите каталог предметов и откройте сохранение Cold Steel I.',
+                             'Load the item catalog, then open a Cold Steel I save.'))
         self.catalog_title.setText(t('Каталог предметов','Item catalog'))
-        self.save_title.setText(t('Учебный инвентарь','Sample inventory'))
+        self.save_title.setText(t('Учебный инвентарь','Sample inventory') if demo else t('Сохранение Steam','Steam save'))
         self.catalog_text.setText(t('Названия и описания будут прочитаны из установленной игры.',
                                     'Item names and descriptions are read from your installed game.'))
         self.save_text.setText(t('Образец использует предметы из установленной игры. Правки хранятся в памяти.',
-                                 'The sample uses items from your installed game. Edits are kept in memory.'))
+                                 'The sample uses items from your installed game. Edits are kept in memory.') if demo else
+                               t('Выберите слот .dat. При перезаписи редактор сохранит резервную копию рядом с файлом.',
+                                 'Select a .dat slot. The editor creates a backup next to the file before overwriting it.'))
         if busy:
             message=t('Ищем установленную игру…','Locating your installed game…')
             if stage=='reading':message=t('Читаем таблицу предметов Cold Steel I…','Reading the Cold Steel I item table…')
@@ -142,13 +146,19 @@ class FirstLaunchPage(QScrollArea):
                (self.browse_button,'primary' if catalog_count and save_name and not busy else 'normal')]
         for button,role in roles:
             if button.property('role')!=role:button.setProperty('role',role);button.update()
-        self.open_button.setText(t('Открыть образец','Open sample') if not save_name else t('Заново загрузить образец','Reload sample'))
+        if demo:
+            self.open_button.setText(t('Заново загрузить образец','Reload sample') if save_name else t('Открыть образец','Open sample'))
+        else:
+            self.open_button.setText(t('Выбрать другое сохранение','Choose another save') if save_name else
+                                     t('Открыть сохранение','Open save'))
         self.open_button.setEnabled(bool(catalog_count) and not busy)
         if save_name:self.save_status.setText(t('Открыто: ','Opened: ')+save_name)
         elif busy:self.save_status.setText(t('Дождитесь загрузки каталога','Waiting for the catalog'))
-        elif catalog_count:self.save_status.setText(t('Готово — можно открыть образец','Ready to open the sample'))
+        elif catalog_count:self.save_status.setText(t('Готово — можно открыть образец','Ready to open the sample') if demo else
+                                                    t('Каталог готов к открытию слота','Ready to open a save'))
         else:self.save_status.setText(t('Сначала загрузите каталог','Load the catalog first'))
         self.browse_button.setText(t('Открыть редактор','Open the editor'))
         self.later.setText(t('На этом этапе можно проверить интерфейс и редактирование образца.',
-                             'Use this preview to test the interface and edit the sample.'))
+                             'Use this preview to test the interface and edit the sample.') if demo else
+                           t('F5 открывает последнее совместимое сохранение.','F5 opens the latest compatible save.'))
         self._fit_content()

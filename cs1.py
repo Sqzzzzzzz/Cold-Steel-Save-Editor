@@ -1,7 +1,8 @@
-"""Experimental CS1 binary inventory code, unused by the interface preview."""
+"""Binary inventory records for the Cold Steel I Steam save format."""
 
+from contextlib import contextmanager
 from datetime import datetime
-from os import fsync, replace
+import os
 from pathlib import Path
 from struct import Struct, unpack_from
 from tempfile import NamedTemporaryFile
@@ -52,7 +53,7 @@ class Save:
         with path.open("rb") as stream:
             data = stream.read(SAVE_SIZE + 1)
         after = path.stat()
-        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        if (before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns):
             raise ValueError("The save changed while it was being read. Reopen it.")
         return cls(data)
 
@@ -87,41 +88,54 @@ class Save:
         return self.original[:INVENTORY_OFFSET] + records + empty + self.original[INVENTORY_END:]
 
     def write(self, path: Path, *, original_path: bool) -> Path | None:
-        """Replace a file atomically after copying its previous bytes to a unique backup."""
-        try:
-            existing = Save.open(path).original
-        except FileNotFoundError:
-            existing = None
-        if original_path and existing != self.original:
-            raise ValueError("The source save changed on disk. Reopen it or save a copy.")
+        """Publish a new copy or back up and replace the exact opened snapshot."""
         candidate = self.edited_bytes()
         Save(candidate)
-        if candidate == existing:
+        if not original_path:
+            with staged_file(path, candidate) as temporary:
+                publish_new(temporary, path)
             return None
 
-        backup = None
-        temporary = None
-        try:
-            with NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as stream:
-                temporary = Path(stream.name)
-                stream.write(candidate)
-                stream.flush()
-                fsync(stream.fileno())
-            if existing is not None:
-                stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-                backup = path.with_name(f"{path.name}.{stamp}.bak")
-                with backup.open("xb") as stream:
-                    stream.write(existing)
-                    stream.flush()
-                    fsync(stream.fileno())
+        def verify_source():
             try:
-                latest = Save.open(path).original
+                with path.open("rb") as stream:
+                    current = stream.read(SAVE_SIZE + 1)
             except FileNotFoundError:
-                latest = None
-            if latest != existing:
-                raise ValueError("The destination changed on disk during the write.")
-            replace(temporary, path)
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
+                current = None
+            if current != self.original:
+                raise ValueError("The source save changed on disk. Reopen it or save a copy.")
+
+        verify_source()
+        if candidate == self.original:
+            return None
+
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        backup = path.with_name(f"{path.name}.{stamp}.bak")
+        with staged_file(path, candidate) as temporary:
+            with staged_file(backup, self.original) as staged_backup:
+                publish_new(staged_backup, backup)
+            verify_source()
+            os.replace(temporary, path)
         return backup
+
+
+@contextmanager
+def staged_file(destination: Path, data: bytes):
+    temporary = None
+    try:
+        with NamedTemporaryFile(dir=destination.parent, prefix=f".{destination.name}.", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        yield temporary
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def publish_new(temporary: Path, destination: Path):
+    if os.name == "nt":
+        os.rename(temporary, destination)
+    else:
+        os.link(temporary, destination)

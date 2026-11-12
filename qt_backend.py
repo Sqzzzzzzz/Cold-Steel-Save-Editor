@@ -1,4 +1,4 @@
-"""Cold Steel I catalog and an in-memory controller for the inherited Qt window."""
+"""Cold Steel I catalog and editor state for the Qt window."""
 
 from collections import Counter, deque
 import csv
@@ -11,7 +11,7 @@ import re
 from PySide6.QtCore import QSettings
 
 from item_catalog import CatalogItem, read_catalog
-from save_storage import InventorySession, SaveStorage
+from save_storage import InventorySession, STEAM_SAVE_DIRECTORY, SteamInventorySession, SteamSaveStorage
 
 
 STEAM_GAME = (
@@ -59,10 +59,11 @@ def category_for(item: CatalogItem) -> str:
 
 
 class EditorCore:
-    demo_mode = True
-    storage: SaveStorage | None = None
-
-    def __init__(self, game: Path | None = None, profile: QSettings | None = None):
+    def __init__(
+        self, game: Path | None = None, profile: QSettings | None = None,
+        *, storage: SteamSaveStorage | None = None,
+    ):
+        self.storage = storage
         self.profile = profile if profile is not None else QSettings("ColdSteelSaveEditor", "ColdSteelI")
         try:
             self.settings = json.loads(self.profile.value("preview/preferences", "{}"))
@@ -79,6 +80,7 @@ class EditorCore:
         self.catalog: dict[int, dict] = {}
         self.english: dict[int, dict] = {}
         self.save: InventorySession | None = None
+        self.last_backup: Path | None = None
         self.undo_stack: deque[dict[int, int]] = deque(maxlen=20)
         self.last_scan: ScanResult | None = None
         self.persistence_warning = ""
@@ -110,12 +112,12 @@ class EditorCore:
         }
         self.last_scan = result
         self.settings["game_root"] = str(result.root)
-        if self.save is None:
+        if self.save is None and self.storage is None:
             self.load_demo()
         self._save_preferences()
 
     def load_demo(self) -> bool:
-        if not self.native:
+        if not self.native or self.storage is not None:
             return False
         counts = Counter()
         quantities = {}
@@ -125,8 +127,55 @@ class EditorCore:
                 quantities[item_id] = min(record["limit"], max(1, 5 - counts[category]))
                 counts[category] += 1
         self.save = InventorySession(quantities)
+        self.last_backup = None
         self.undo_stack.clear()
         return True
+
+    @property
+    def source(self) -> Path | None:
+        return self.save.source if isinstance(self.save, SteamInventorySession) else None
+
+    @property
+    def save_directory(self) -> Path:
+        remembered = self.settings.get("save_directory")
+        if remembered and Path(remembered).is_dir():
+            return Path(remembered)
+        return STEAM_SAVE_DIRECTORY
+
+    def open_save(self, path: Path | None = None) -> Path:
+        if self.storage is None:
+            raise RuntimeError("Steam save operations are unavailable in sample mode.")
+        session = self.storage.read(path) if path is not None else self.storage.latest(self.save_directory)
+        self.save = session
+        self.last_backup = None
+        self.undo_stack.clear()
+        self.settings["save_directory"] = str(session.source.parent)
+        self._save_preferences()
+        return session.source
+
+    def save_copy(self, destination: Path) -> Path:
+        if self.storage is None or not isinstance(self.save, SteamInventorySession):
+            raise RuntimeError("No save loaded")
+        return self.storage.save_copy(self.save, destination, self.native)
+
+    def overwrite(self) -> Path | None:
+        if self.storage is None or not isinstance(self.save, SteamInventorySession):
+            raise RuntimeError("No save loaded")
+        self.save, backup = self.storage.overwrite(self.save, self.native)
+        self.last_backup = backup or self.last_backup
+        self.undo_stack.clear()
+        return backup
+
+    def compare(self, path: Path) -> tuple[int, int, int]:
+        if self.storage is None or not isinstance(self.save, SteamInventorySession):
+            raise RuntimeError("No save loaded")
+        other = self.storage.read(path).quantities
+        current = self.save.quantities
+        return (
+            len(current.keys() - other.keys()),
+            len(other.keys() - current.keys()),
+            sum(current[item_id] != other[item_id] for item_id in current.keys() & other.keys()),
+        )
 
     def import_english_catalog(self, source: str):
         path = Path(source)
@@ -162,7 +211,14 @@ class EditorCore:
 
     def can_edit(self, item_id: int | None) -> bool:
         item = self.native.get(item_id)
-        return bool(self.save and item and item.editable)
+        return bool(self.save and item and item.editable and not self.is_equipped_master(item_id))
+
+    def is_equipped_master(self, item_id: int | None) -> bool:
+        item = self.native.get(item_id)
+        return bool(
+            isinstance(self.save, SteamInventorySession) and item and item.category == "master"
+            and item_id in self.save.equipped_masters
+        )
 
     def can_delete(self, item_id: int | None) -> bool:
         return self.can_edit(item_id) and self.quantity(item_id) > 0
@@ -173,6 +229,8 @@ class EditorCore:
         before = self.save.quantities
         candidate = before.copy()
         for item_id, quantity in changes.items():
+            if self.is_equipped_master(item_id):
+                raise ValueError("This Master Quartz is already equipped.")
             if not self.can_edit(item_id):
                 raise ValueError("This item cannot be edited.")
             limit = self.native[item_id].limit
@@ -182,6 +240,8 @@ class EditorCore:
                 candidate[item_id] = quantity
             else:
                 candidate.pop(item_id, None)
+        if isinstance(self.save, SteamInventorySession) and len(candidate) > self.save.capacity:
+            raise ValueError("The inventory has no free slots.")
         if candidate != before:
             self.undo_stack.append(before)
             self.save.quantities = candidate

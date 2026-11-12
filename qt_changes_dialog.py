@@ -16,6 +16,7 @@ class ChangesDialog(QDialog):
         self.setStyleSheet(window.styleSheet())
         self.window_editor=window
         t=window.msg;window.edit_changes.refresh(window.core.save)
+        source = window.core.source
         data=window.edit_changes;counts=data.counts()
         layout=QVBoxLayout(self);layout.setContentsMargins(22,20,22,18);layout.setSpacing(12)
         self.heading=QLabel(t('ИЗМЕНЕНИЯ ПЕРЕД ЗАПИСЬЮ','CHANGES BEFORE SAVING'))
@@ -26,10 +27,13 @@ class ChangesDialog(QDialog):
         layout.addWidget(self.summary)
         if save_mode:
             action=t('Отдельная копия исходного файла','Separate copy of the source file') if save_mode=='copy' else t('Перезапись с резервной копией','Overwrite with a backup')
-            self.destination=QLabel(action+' · '+t('Предпросмотр','Preview'))
+            self.destination=QLabel(action+' · '+(source.name if source else t('Предпросмотр','Preview')))
+            if source:
+                self.destination.setToolTip(str(source))
             self.destination.setObjectName('reviewDestination');layout.addWidget(self.destination)
         self.table=QTableWidget(len(data.changes),5);self.table.setObjectName('reviewTable')
-        self.table.setHorizontalHeaderLabels([t('Предмет','Item'),'ID',t('В образце','Original sample'),t('После правки','After editing'),t('Действие','Action')])
+        original_label = t('В файле','In file') if source else t('В образце','Original sample')
+        self.table.setHorizontalHeaderLabels([t('Предмет','Item'),'ID',original_label,t('После правки','After editing'),t('Действие','Action')])
         self.table.verticalHeader().hide();self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -52,9 +56,12 @@ class ChangesDialog(QDialog):
         if data.reordered:note=t('Также изменён порядок предметов в слотах.','The item order in the save slots also changed.')
         elif not data.changes:note=t('Несохранённых изменений нет.','No unsaved changes.')
         else:note=t('Показаны все правки, включая предметы за пределами текущего фильтра.','All changes are shown, including items outside the current filter.')
-        if save_mode:
-            note += '\n' + t('Запись игровых файлов будет подключена на следующем этапе.',
-                              'Writing game files is planned for a later stage.')
+        if save_mode and source is None:
+            note += '\n' + t('Запись игровых файлов недоступна в учебном режиме.',
+                              'Writing game files is unavailable in sample mode.')
+        elif save_mode == 'overwrite':
+            note += '\n' + t('Перед записью рядом с файлом будет создана резервная копия .bak.',
+                              'A .bak backup will be created next to the file before writing.')
         if window.has_pending_quantity():
             note+='\n'+t(f'Ввод количества для «{window.core.item_name(window.active_item_id)}» ещё не применён.',
                          f'The typed quantity for “{window.core.item_name(window.active_item_id)}” has not been applied.')
@@ -66,5 +73,8 @@ class ChangesDialog(QDialog):
         if save_mode:
             self.proceed=HudButton(t('Сохранить копию…','Save a copy…') if save_mode=='copy' else t('Записать с копией','Save with a backup'))
             self.proceed.setProperty('role','primary');self.proceed.setIcon(hud_icon('check'))
-            self.proceed.setFixedSize(240,46);self.proceed.setEnabled(False);buttons.addWidget(self.proceed)
+            self.proceed.setFixedSize(240,46)
+            self.proceed.setEnabled(bool(source and (save_mode == 'copy' or source.suffix.lower() == '.dat')))
+            self.proceed.clicked.connect(self.accept)
+            buttons.addWidget(self.proceed)
         layout.addLayout(buttons)

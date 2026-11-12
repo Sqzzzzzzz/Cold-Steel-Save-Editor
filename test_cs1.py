@@ -1,12 +1,15 @@
 from pathlib import Path
+import os
 from struct import pack, pack_into
 from tempfile import TemporaryDirectory
 from unittest import TestCase
+from unittest.mock import patch
 
 from cs1 import (
     CatalogItem, EMPTY_RECORD, INVENTORY_END, INVENTORY_OFFSET, ORBMENTS_OFFSET,
-    RECORD, SAVE_HEADER, SAVE_SIZE, SLOTS, Save, read_catalog,
+    RECORD, SAVE_HEADER, SAVE_SIZE, SLOTS, Save, publish_new, read_catalog,
 )
+from save_storage import SteamSaveStorage
 
 
 POTION = CatalogItem("Tear Balm", "Restores 800 HP", "items", 99, 0x81, 0)
@@ -85,6 +88,73 @@ class SaveTests(TestCase):
             self.assertIsNone(save.write(target, original_path=False))
             self.assertEqual(source.read_bytes(), original)
             self.assertEqual(Save.open(target).items, {0: 3})
+
+    def test_existing_destination_is_left_untouched_by_save_copy(self):
+        with TemporaryDirectory() as directory:
+            destination = Path(directory) / "save002.dat"
+            existing = make_save((0, 9))
+            destination.write_bytes(existing)
+            save = Save(make_save((0, 2)))
+            with self.assertRaises(FileExistsError):
+                save.write(destination, original_path=False)
+            self.assertEqual(destination.read_bytes(), existing)
+            self.assertEqual(list(Path(directory).iterdir()), [destination])
+
+    def test_overwrite_rechecks_source_after_creating_backup(self):
+        original = make_save((0, 2))
+        newer = make_save((0, 9))
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "save001.dat"
+            path.write_bytes(original)
+            save = Save.open(path)
+            save.set_quantity(0, 5, POTION)
+
+            def publish_and_update(staged, backup):
+                publish_new(staged, backup)
+                path.write_bytes(newer)
+
+            with patch("cs1.publish_new", side_effect=publish_and_update):
+                with self.assertRaisesRegex(ValueError, "changed on disk"):
+                    save.write(path, original_path=True)
+            self.assertEqual(path.read_bytes(), newer)
+            backup, = path.parent.glob("*.bak")
+            self.assertEqual(backup.read_bytes(), original)
+
+
+class SteamStorageTests(TestCase):
+    def test_latest_skips_incompatible_slots_and_sidecars(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            older = root / "save001.dat"
+            latest = root / "autosave00.dat"
+            invalid = root / "save511.dat"
+            sidecar = root / "autosave00_t.dat"
+            for index, path in enumerate((older, latest, invalid, sidecar), 1):
+                path.write_bytes(b"not a slot" if path == invalid else make_save((0, index)))
+                os.utime(path, (index, index))
+            session = SteamSaveStorage().latest(root)
+            self.assertEqual(session.source, latest.resolve())
+            self.assertEqual(session.quantities, {0: 2})
+
+    def test_backup_can_be_restored_as_a_new_slot_without_mutating_it(self):
+        original = make_save((0, 2), (60000, 8))
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "save001.dat"
+            target.write_bytes(original)
+            storage = SteamSaveStorage()
+            session = storage.read(target)
+            session.quantities = {0: 7, 60000: 8}
+            updated, backup = storage.overwrite(session, {0: POTION})
+            self.assertFalse(updated.changed)
+            self.assertEqual(updated.quantities, {0: 7, 60000: 8})
+            self.assertEqual(backup.read_bytes(), original)
+            restored = storage.read(backup)
+            with self.assertRaisesRegex(ValueError, "backup is open"):
+                storage.overwrite(restored, {0: POTION})
+            copy = storage.save_copy(restored, root / "restored.dat", {})
+            self.assertEqual(copy.read_bytes(), original)
+            self.assertEqual(backup.read_bytes(), original)
 
 
 class CatalogTests(TestCase):
