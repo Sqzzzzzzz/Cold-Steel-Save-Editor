@@ -1,0 +1,6 @@
+/.venv/
+/assets/
+__pycache__/
+*.pyc
+*.dat
+*.bak
