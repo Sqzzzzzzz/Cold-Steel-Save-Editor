@@ -7,10 +7,10 @@ import shutil
 import subprocess
 from tempfile import TemporaryDirectory
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon, QImage, QPixmap
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QIcon, QImage, QPainter, QPainterPath, QPixmap, QTransform
 
-from cs1 import CatalogItem
+from item_catalog import CatalogItem
 
 
 ASSETS = Path(__file__).resolve().parent / "assets"
@@ -18,12 +18,17 @@ SECTION_ICONS = {
     "all": 0x96, "equipment": 0x01, "quartz": 0x50, "master": 0x32,
     "materials": 0x27, "books": 0x16, "key": 0x95, "dlc": 0x14, "items": 0x70,
 }
+MENU_ICON_CENTERS = {
+    "inventory": (665, 157), "catalog": (665, 413), "game": (665, 478),
+    "open": (833, 210), "save": (833, 149), "remove": (833, 267),
+}
 
 
 class GameArt:
     def __init__(self):
         self.items = QPixmap(str(ASSETS / "item-atlas.png"))
         self.masters = QPixmap(str(ASSETS / "master-atlas.png"))
+        self.menu = QPixmap(str(ASSETS / "menu-atlas.png"))
 
     @cache
     def tile(self, index: int, master: bool = False) -> QPixmap:
@@ -34,6 +39,22 @@ class GameArt:
 
     def section_icon(self, category: str) -> QIcon:
         return QIcon(self.tile(SECTION_ICONS[category]))
+
+    def menu_icon(self, action: str) -> QIcon:
+        if self.menu.isNull():
+            return QIcon()
+        x, y = MENU_ICON_CENTERS[action]
+        source = self.menu.copy(x - 21, y - 21, 42, 42)
+        circle = QPixmap(source.size())
+        circle.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(circle)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        clip = QPainterPath()
+        clip.addEllipse(QRectF(circle.rect()).adjusted(1, 1, -1, -1))
+        painter.setClipPath(clip)
+        painter.drawPixmap(0, 0, source)
+        painter.end()
+        return QIcon(circle)
 
     def item_icon(self, item_id: int, item: CatalogItem) -> QIcon:
         picture = self.item_picture(item_id, item)
@@ -58,6 +79,7 @@ def import_art(game: Path, senpatcher: Path) -> None:
     textures = (
         ("icons.png.phyre", "item-atlas.png", 512, 512),
         ("orbment_mq.png.phyre", "master-atlas.png", 512, 256),
+        ("campmenu1.png.phyre", "menu-atlas.png", 1024, 1024),
     )
     with TemporaryDirectory() as directory:
         extracted = Path(directory)
@@ -75,8 +97,16 @@ def import_art(game: Path, senpatcher: Path) -> None:
             if b"PTexture2D\0RGBA8\0" not in header:
                 raise ValueError(f"Unrecognized Cold Steel I texture format: {original}")
             texture = QImage(data[-length:], width, height, width * 4, QImage.Format.Format_RGBA8888)
-            if not texture.flipped(Qt.Orientation.Vertical).save(str(ASSETS / output)):
+            upright = texture.flipped(Qt.Orientation.Vertical)
+            if not upright.save(str(ASSETS / output)):
                 raise OSError(f"Could not write {output}.")
+            if output == "item-atlas.png":
+                # The original white menu cursor points right in tile 0xBE.
+                cursor = upright.copy(457, 357, 19, 21)
+                for direction, angle in (("up", -90), ("down", 90)):
+                    filename = ASSETS / f"arrow-{direction}.png"
+                    if not cursor.transformed(QTransform().rotate(angle)).save(str(filename)):
+                        raise OSError(f"Could not write {filename.name}.")
 
     logo = game / "data/system_us/savelogo.png"
     if logo.is_file() and not (ASSETS / "logo.png").exists():
