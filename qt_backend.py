@@ -25,7 +25,7 @@ FISH_TABLE = ITEM_TABLE.with_name("t_notefish.tbl")
 DLC_TABLE = ITEM_TABLE.with_name("t_dlc.tbl")
 ITEM_TEXT = Path(__file__).resolve().parent / "assets/item-text.json"
 CYRILLIC = re.compile(r"[А-Яа-яЁё]")
-NON_LATIN = re.compile(r"[А-Яа-яЁё\u3040-\u30ff\u3400-\u9fff]")
+CJK = re.compile(r"[\u3000-\u303f\u3040-\u30ff\u31f0-\u31ff\u3200-\u33ff\u3400-\u9fff\uf900-\ufaff\uff66-\uff9f]")
 LATIN = re.compile(r"[A-Za-z]")
 
 
@@ -93,9 +93,11 @@ def scan_game_tables(root: Path) -> ScanResult:
 
 
 def uses_language(text: str, language: str) -> bool:
+    if "\uFFFD" in text or CJK.search(text):
+        return False
     if language == "ru":
         return bool(CYRILLIC.search(text))
-    return bool(LATIN.search(text) and not NON_LATIN.search(text))
+    return bool(LATIN.search(text) and not CYRILLIC.search(text))
 
 
 def read_item_text() -> dict[str, dict[ItemKey, tuple[str, str]]]:
@@ -305,15 +307,21 @@ class EditorCore:
         )
 
     def _item_text(self, item_id: ItemKey) -> tuple[str, str]:
-        if self.language == "en" and item_id in self.english:
-            return self.english[item_id]
-        localized = self.translations.get(self.language, {}).get(item_id)
-        if localized is not None:
-            return localized
+        imported = self.english.get(item_id) if self.language == "en" else None
+        bundled = self.translations.get(self.language, {}).get(item_id)
         record = self.catalog.get(item_id)
-        if record and uses_language(record["name"], self.language):
-            return record["name"], record["description"]
-        return "", ""
+        native = (record["name"], record["description"]) if record else None
+        name = description = ""
+        for candidate in (imported, bundled, native):
+            if candidate is None:
+                continue
+            if not name and uses_language(candidate[0], self.language):
+                name = candidate[0]
+            if not description and uses_language(candidate[1], self.language):
+                description = candidate[1]
+            if name and description:
+                break
+        return name, description
 
     def item_name(self, item_id: ItemKey) -> str:
         name, _ = self._item_text(item_id)
@@ -325,15 +333,15 @@ class EditorCore:
         return name or (f"Предмет № {item_id}" if self.language == "ru" else f"Item #{item_id}")
 
     def details_text(self, item_id: ItemKey) -> str:
-        _, description = self._item_text(item_id)
-        return description if uses_language(description, self.language) else ""
+        return self._item_text(item_id)[1]
 
     def missing_translations(self) -> list[tuple[ItemKey, str]]:
-        return [
-            (item_id, self.item_name(item_id))
-            for item_id in self.visible()
-            if not self._item_text(item_id)[0]
-        ]
+        missing = []
+        for item_id in self.visible():
+            name, description = self._item_text(item_id)
+            if not name or not description:
+                missing.append((item_id, name or self.item_name(item_id)))
+        return missing
 
     def quantity(self, item_id: ItemKey | None) -> int:
         return self.save.quantities.get(item_id, 0) if self.save else 0

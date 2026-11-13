@@ -1212,8 +1212,6 @@ class MainWindow(QMainWindow):
         description=self.core.details_text(iid).strip()
         if isinstance(iid,str):
             description=' '.join(description.split())
-        if description in ('◆','◇','-','—'):
-            description=''
         stats=''
         if item is not None:
             labels=STAT_NAMES_RU if self.language=='ru' else STAT_NAMES

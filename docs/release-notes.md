@@ -1,15 +1,15 @@
-# Cold Steel I Inventory Editor v1.0.1
+# Cold Steel I Inventory Editor v1.0.2
 
 ## What's new
 
-- One Heimdallr backdrop spans the title bar and the editor panels.
-- Column headings and navigation labels fit more comfortably in compact windows.
-- The Recently added category records items added to the inventory. Quantity changes and removals leave that history alone.
-- The README includes fresh English and Russian screenshots from the running editor.
+- Added Russian and English reference descriptions for sepith and notebook entries.
+- Corrected item descriptions and stats in both languages, including remaining English text in Russian descriptions.
+- The translation report now includes missing descriptions.
+- The Windows x64 ZIP contains a single EXE with the theme and translations built in.
 
 ## Installation
 
-1. [Download the Windows x64 ZIP with a single EXE](https://github.com/Sqzzzzzzz/Cold-Steel-Save-Editor/releases/download/v1.0.1/Cold-Steel-I-Inventory-Editor-v1.0.1-windows-x64-onefile.zip). You can verify it with the [SHA-256 checksum](https://github.com/Sqzzzzzzz/Cold-Steel-Save-Editor/releases/download/v1.0.1/SHA256SUMS-onefile.txt).
+1. [Download the Windows x64 ZIP with a single EXE](https://github.com/Sqzzzzzzz/Cold-Steel-Save-Editor/releases/download/v1.0.2/Cold-Steel-I-Inventory-Editor-v1.0.2-windows-x64-onefile.zip). You can verify it with the [SHA-256 checksum](https://github.com/Sqzzzzzzz/Cold-Steel-Save-Editor/releases/download/v1.0.2/SHA256SUMS.txt).
 2. Extract and run `Cold_Steel_I_Inventory_Editor.exe`.
 3. Select your Steam game directory if the editor does not find it automatically, then open a compatible save.
 

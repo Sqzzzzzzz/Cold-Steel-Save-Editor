@@ -27,7 +27,7 @@ A Windows inventory editor for **The Legend of Heroes: Trails of Cold Steel I** 
 - The Steam PC installation of **Trails of Cold Steel I**, with its item table at `data/text/dat_us/t_item.tbl`.
 - A version-8 XSEED PC save (460,992 bytes) for inventory editing. Other games, console saves and other PC editions are outside the verified scope.
 
-[Download the Windows x64 ZIP with a single EXE](https://github.com/Sqzzzzzzz/Cold-Steel-Save-Editor/releases/download/v1.0.1/Cold-Steel-I-Inventory-Editor-v1.0.1-windows-x64-onefile.zip). Extract `Cold_Steel_I_Inventory_Editor.exe` and run it. To verify the archive, compare `Get-FileHash -Algorithm SHA256 <archive.zip>` with the [SHA-256 checksum](https://github.com/Sqzzzzzzz/Cold-Steel-Save-Editor/releases/download/v1.0.1/SHA256SUMS-onefile.txt).
+[Download the Windows x64 ZIP with a single EXE](https://github.com/Sqzzzzzzz/Cold-Steel-Save-Editor/releases/download/v1.0.2/Cold-Steel-I-Inventory-Editor-v1.0.2-windows-x64-onefile.zip). Extract `Cold_Steel_I_Inventory_Editor.exe` and run it. To verify the archive, compare `Get-FileHash -Algorithm SHA256 <archive.zip>` with the [SHA-256 checksum](https://github.com/Sqzzzzzzz/Cold-Steel-Save-Editor/releases/download/v1.0.2/SHA256SUMS.txt).
 
 The EXE includes the theme, original game artwork and bilingual item text. The editor reads item IDs and limits from your Steam installation.
 
@@ -83,12 +83,12 @@ Use 64-bit Python 3.14 on Windows.
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
 .\.venv\Scripts\python.exe -m unittest discover -v
-.\.venv\Scripts\python.exe build_preview.py
-.\.venv\Scripts\python.exe package_release.py --tag v1.0.1
-.\.venv\Scripts\python.exe verify_package.py release/local --full-theme
+.\.venv\Scripts\python.exe build_preview.py --onefile
+.\.venv\Scripts\python.exe package_release.py --onefile --tag v1.0.2
+.\.venv\Scripts\python.exe verify_package.py release/onefile --onefile --full-theme
 ```
 
-For a Windows ZIP containing a single executable, add `--onefile` to the build, package and verification commands. Verify the single-file ZIP in `release/onefile`. This build extracts its runtime files to a temporary directory when it starts. It reads the catalog from the installed Steam game.
+The single-file build extracts its runtime files to a temporary directory at startup. For a folder-based build, omit `--onefile` from the three commands and verify the ZIP in `release/local`.
 
 Installed-game UI tests run when the standard Steam installation is present. The Windows workflow also tests the GUI with synthetic records and starts the packaged executable with and without a synthetic save.
 

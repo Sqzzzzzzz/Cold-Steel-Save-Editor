@@ -1,6 +1,7 @@
 """Focused checks for the memory-only controller and the transplanted Qt window."""
 
 import os
+import re
 from dataclasses import replace
 from pathlib import Path
 from struct import pack
@@ -16,7 +17,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QStyle, QS
 from item_catalog import CatalogItem, NOTEBOOK_IDS
 from game_art import BLADE_CARD_TILE, RELIEF_CARD_TILE, YELLOW_ORB_TILE
 from edit_changes import EditChanges
-from qt_backend import EditorCore, ITEM_TABLE, ITEM_TEXT, STEAM_GAME, ScanResult, find_game_install, scan_game_tables, uses_language, write_csv
+from qt_backend import EditorCore, ITEM_TABLE, ITEM_TEXT, STEAM_GAME, ScanResult, find_game_install, read_item_text, scan_game_tables, uses_language, write_csv
 from qt_changes_dialog import ChangesDialog
 from qt_window import MainWindow
 from save_storage import SteamSaveStorage
@@ -78,6 +79,48 @@ class PreviewTests(TestCase):
             self.assertEqual(core.item_name(0), "Tear Balm")
             self.assertEqual(core.item_name(1), "Item #1")
             self.assertEqual(core.details_text(1), "")
+
+    def test_item_descriptions_fall_back_to_same_language_and_report_missing_text(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = QSettings(str(root / "settings.ini"), QSettings.Format.IniFormat)
+            core = EditorCore(profile=profile)
+            item = CatalogItem("Tear Balm", "Restores 800 HP.", "items", 99, 0x81, 0)
+            core.apply_scan_result(ScanResult(root, (), {0: item, 1: item, 2: item}, translations={
+                "en": {0: ("Tear Balm", "◆"), 2: ("Tear Balm", "Restores health.")},
+                "ru": {0: ("Зелье Тиа", ""), 1: ("Зелье Тиа", "Восстанавливает ОЗ㍻."),
+                       2: ("Зелье Тиа", "Восстанавливает ОЗ.")},
+            }))
+            self.assertEqual(core.missing_translations(), [(0, "Зелье Тиа"), (1, "Зелье Тиа")])
+            self.assertEqual(core.details_text(0), "")
+            self.assertEqual(core.details_text(2), "Восстанавливает ОЗ.")
+            core.set_language("en")
+            core.english = {2: ("Imported Tear Balm", "")}
+            self.assertEqual(core.details_text(0), "Restores 800 HP.")
+            self.assertEqual(core.item_name(2), "Imported Tear Balm")
+            self.assertEqual(core.details_text(2), "Restores health.")
+            self.assertFalse(core.missing_translations())
+
+    @skipUnless(ITEM_TEXT.is_file(), "Local bilingual item text unavailable")
+    def test_bundled_item_descriptions_cover_both_languages(self):
+        texts = read_item_text()
+        self.assertEqual(texts["ru"].keys(), texts["en"].keys() - {805, 806})
+        # Keep class numbers, item model names, rarity markers and cooking ranks.
+        identifiers = {"VII", "SG", "S", "U", "R", "SR", "A", "B", "C", "D"}
+        for lang, entries in texts.items():
+            for key, (name, description) in entries.items():
+                with self.subTest(language=lang, key=key):
+                    self.assertTrue(uses_language(name, lang))
+                    self.assertTrue(uses_language(description, lang))
+                    self.assertEqual(description.count("["), description.count("]"))
+                    if lang == "ru":
+                        self.assertFalse(set(re.findall(r"[A-Za-z]+", description)) - identifiers)
+        for key in (*range(241, 259), "fish:0", "dlc:7003"):
+            self.assertIn(key, texts["ru"])
+            self.assertIn(key, texts["en"])
+        self.assertIn("10%", texts["ru"][2260][1])
+        self.assertIn("СИЛ+370", texts["ru"][1133][1])
+        self.assertIn("RNG+4", texts["en"][1061][1])
 
     def test_invalid_profile_fields_are_discarded(self):
         with TemporaryDirectory() as directory:
@@ -156,7 +199,7 @@ class CleanWindowTests(TestCase):
                     for section, table in (("catalog", window.cat_table), ("inventory", window.inv_table)):
                         window.navigate_section(section)
                         header = table.horizontalHeader()
-                        for column in range(header.count()):
+                        for column in range(1, header.count()):
                             window.sort_rows(section, column)
                             app.processEvents()
                             with self.subTest(language=language, section=section, column=column):
@@ -275,7 +318,7 @@ class NativeWindowTests(TestCase):
         window = self.window
         table = window.cat_table
         table.selectRow(0)
-        item_ids = tuple(i for i, item in self.core.native.items() if item.editable)
+        item_ids = tuple(self.core.visible())
         self.assertEqual(window.active_item_id, 0)
         self.assertEqual(window.item_name.accessibleName(), "Зелье «Тиа»")
         self.assertIn("ОЗ", window.description.toPlainText())

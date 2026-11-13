@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.2
+
+- Add Russian and English reference descriptions for sepith and notebook entries.
+- Correct mixed-language text, typos and inconsistent item stat descriptions.
+- Report missing descriptions and recover same-language text from the bundled or installed catalog.
+- Ship a Windows ZIP containing a single executable.
+
 ## 1.0.1
 
 - Use a single Heimdallr backdrop across the editor.
