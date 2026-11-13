@@ -6,9 +6,11 @@
 
 A Windows inventory editor for **The Legend of Heroes: Trails of Cold Steel I** on PC (Steam). Browse the installed game's catalog, review edits before writing, and keep a byte-for-byte backup of the original slot.
 
-![Catalog in the running editor with sample data and the default artwork fallback](docs/editor.png)
+![English item catalog showing healing items and EP charges](docs/editor.png)
 
-*The screenshot shows the running editor with sample data and without the optional local artwork.*
+![Russian item catalog showing the fishing journal](docs/editor-ru.png)
+
+*Both screenshots show the editor's in-memory demo inventory.*
 
 ## Features
 
@@ -16,7 +18,7 @@ A Windows inventory editor for **The Legend of Heroes: Trails of Cold Steel I** 
 - Add items, change quantities, remove items and apply supported changes to multiple selections. Review, undo or reset edits before saving.
 - Open the most recent compatible save, compare inventory counts between two saves, and export the inventory to CSV.
 - Save a separate copy or overwrite the current slot with a timestamped backup.
-- Switch the interface between English and Russian. The editor reads item names and descriptions from the installed game and accepts a local bilingual item-text pack.
+- Switch the interface, item names and descriptions between English and Russian.
 - Browse fishing records and DLC listings from the game's tables. Entries such as fishing journal records, DLC packs and equipped master quartz have editing restrictions.
 
 ## Requirements and installation
@@ -27,7 +29,7 @@ A Windows inventory editor for **The Legend of Heroes: Trails of Cold Steel I** 
 
 Download the Windows ZIP from [Latest Release](https://github.com/Sqzzzzzzz/Cold-Steel-Save-Editor/releases/latest), extract the whole folder and run `Cold_Steel_I_Inventory_Editor.exe`. Keep the `_internal` directory beside the EXE. The accompanying `SHA256SUMS.txt` contains the archive checksum. On Windows, compare it against the output of `Get-FileHash -Algorithm SHA256 <archive.zip>`.
 
-The portable build reads the English catalog from your Steam installation. Optional artwork and the bilingual catalog are loaded from `_internal/assets` when present. See [Local artwork and item text](#local-artwork-and-item-text).
+The Windows ZIP includes the theme, original game artwork and the bilingual item catalog. Keep `_internal/assets` in place after extraction. The editor reads item IDs and limits from your Steam installation.
 
 ## Using the editor
 
@@ -50,20 +52,20 @@ To restore a backup, open its `.bak` file with **Open manually** and use **Save 
 | Game directory not found | Choose the installation containing `ed8.exe` and `data/text/dat_us/t_item.tbl`. The editor also looks in additional libraries registered by Steam. |
 | No compatible save found | Open a version-8 Steam slot manually. Files such as `sdslot.dat`, thumbnails and autosave sidecars are separate from the save slot. |
 | Source changed or write access denied | Close the game, allow Steam Cloud to finish, and reopen the slot. You can also save a separate copy to a writable folder. |
-| Russian item names are placeholders | The Russian interface works independently. Add a local bilingual item-text pack, or switch to English to read the original catalog. |
-| Game artwork is missing | The portable package uses the editor's fallback visuals. Install local assets and restart. |
+| Russian item names are placeholders | Extract the entire ZIP again and check that `_internal/assets/item-text.json` is present. |
+| Game artwork is missing | Extract the entire ZIP again, keeping `_internal/assets` next to the executable. |
 
 ## Known limitations
 
 - Editing is limited to the inventory block. The editor leaves progression, sepith balances, equipped master quartz, slot indexes and thumbnails alone.
 - Structural validation covers the save header, file size and inventory records. It does not validate every field in the game state.
 - DLC listings reflect the installed tables. The editor does not change Steam ownership or unlock packages.
-- Some items share their native inventory icon. Original item text and some icon artwork are optional local resources.
+- Some items share their native inventory icon.
 - Windows builds are unsigned.
 
 ## Local artwork and item text
 
-The complete theme uses locally supplied game artwork and an optional bilingual item-text pack. A binary build loads those files from `_internal/assets`; a source build loads them from `assets`. For example, `assets/item-text.json` is a UTF-8 object with `en` and `ru` maps. Each map uses decimal item IDs or references such as `fish:0` and `dlc:25` as keys, with `[name, description]` as values.
+The complete theme loads from `_internal/assets` in a binary build and from `assets` when running from source. The bilingual catalog, `assets/item-text.json`, is a UTF-8 object with `en` and `ru` maps. Each map uses decimal item IDs or references such as `fish:0` and `dlc:25` as keys, with `[name, description]` as values.
 
 To extract the supported menu and inventory art from your own installation for local use, run:
 
@@ -71,7 +73,7 @@ To extract the supported menu and inventory art from your own installation for l
 python game_art.py "C:\Program Files (x86)\Steam\steamapps\common\Trails of Cold Steel" "C:\Tools\SenPatcher.exe"
 ```
 
-The importer handles the menu, standard items, master quartz, game logo and Blade cards. The full-theme build also needs the local background, banner, emblem and supplemental artwork listed in [build_preview.py](build_preview.py). The Russian item-text source used during local development is credited to [Zeru and the Sen no Kiseki translation project](https://steamcommunity.com/sharedfiles/filedetails/?id=2169950170).
+The importer handles the menu, standard items, master quartz, game logo and Blade cards. The release asset list is in [build_preview.py](build_preview.py). The Russian item text is credited to [Zeru and the Sen no Kiseki translation project](https://steamcommunity.com/sharedfiles/filedetails/?id=2169950170).
 
 ## Build and test
 
@@ -81,11 +83,12 @@ Use 64-bit Python 3.14 on Windows.
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
 .\.venv\Scripts\python.exe -m unittest discover -v
-.\.venv\Scripts\python.exe build_preview.py --without-assets
-.\.venv\Scripts\python.exe package_release.py --without-assets --tag v1.0.0
+.\.venv\Scripts\python.exe build_preview.py
+.\.venv\Scripts\python.exe package_release.py --tag v1.0.0
+.\.venv\Scripts\python.exe verify_package.py release/local --full-theme
 ```
 
-Omit `--without-assets` from both build and packaging commands for a full local build with the complete asset set. Installed-game UI tests run when the standard Steam installation is present. The Windows workflow also tests the GUI with synthetic records and starts the packaged executable without a game installation.
+Installed-game UI tests run when the standard Steam installation is present. The Windows workflow also tests the GUI with synthetic records and starts the packaged executable with and without a synthetic save.
 
 ## License and credits
 

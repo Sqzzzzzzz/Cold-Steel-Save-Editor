@@ -4,12 +4,14 @@ import argparse
 from hashlib import file_digest
 import os
 from pathlib import Path
+from struct import pack, unpack_from
 import subprocess
 from tempfile import TemporaryDirectory
 from zipfile import ZipFile
-from struct import unpack_from
 
 from build_preview import ART, NAME
+from qt_backend import ITEM_TABLE
+from test_cs1 import make_save
 from version import VERSION
 
 
@@ -39,6 +41,10 @@ def verify(directory: Path, *, full_theme: bool, save: Path | None) -> None:
         assets = bundle / "_internal/assets"
         if full_theme and any(not (assets / name).is_file() for name in ART):
             raise FileNotFoundError("The themed package is incomplete.")
+        if full_theme:
+            for name in ART:
+                if (assets / name).read_bytes() != (Path(__file__).resolve().parent / "assets" / name).read_bytes():
+                    raise ValueError(f"Bundled asset differs from the release source: {name}")
         if not full_theme and assets.exists():
             raise ValueError("The portable package contains local assets.")
         system = Path(os.environ["SystemRoot"])
@@ -47,15 +53,23 @@ def verify(directory: Path, *, full_theme: bool, save: Path | None) -> None:
         environment["PATH"] = os.pathsep.join(map(str, (system / "System32", system)))
         subprocess.run([str(exe), "--smoke-test-clean"], cwd=bundle, env=environment, timeout=25, check=True)
         if full_theme:
+            copy = root / "test-slot.dat"
+            args = ["--save", str(copy)]
             if save is None:
-                args = ["--demo"]
+                game = root / "game-fixture"
+                table = game / ITEM_TABLE
+                table.parent.mkdir(parents=True)
+                metadata = bytearray(46)
+                metadata[0], metadata[39] = 0x81, 99
+                table.write_bytes(pack("<H", 1) + b"item\0\0\0" + bytes(4) + b"SL\0" + metadata
+                                  + b"Sample Recovery Item\0Restores health\0")
+                snapshot = make_save((0, 2))
+                args += ["--game", str(game)]
             else:
-                copy = root / "test-slot.dat"
                 snapshot = save.read_bytes()
-                copy.write_bytes(snapshot)
-                args = ["--save", str(copy)]
+            copy.write_bytes(snapshot)
             subprocess.run([str(exe), "--smoke-test", *args], cwd=bundle, env=environment, timeout=25, check=True)
-            if save is not None and (copy.read_bytes() != snapshot or save.read_bytes() != snapshot):
+            if copy.read_bytes() != snapshot or (save is not None and save.read_bytes() != snapshot):
                 raise ValueError("A smoke test changed the save or its copy.")
     print(f"Verified archive, checksum and startup: {archive.name}")
 
