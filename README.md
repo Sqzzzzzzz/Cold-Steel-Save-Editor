@@ -27,9 +27,9 @@ A Windows inventory editor for **The Legend of Heroes: Trails of Cold Steel I** 
 - The Steam PC installation of **Trails of Cold Steel I**, with its item table at `data/text/dat_us/t_item.tbl`.
 - A version-8 XSEED PC save (460,992 bytes) for inventory editing. Other games, console saves and other PC editions are outside the verified scope.
 
-Download the Windows ZIP from [Latest Release](https://github.com/Sqzzzzzzz/Cold-Steel-Save-Editor/releases/latest), extract the whole folder and run `Cold_Steel_I_Inventory_Editor.exe`. Keep the `_internal` directory beside the EXE. The accompanying `SHA256SUMS.txt` contains the archive checksum. On Windows, compare it against the output of `Get-FileHash -Algorithm SHA256 <archive.zip>`.
+[Download the Windows x64 ZIP with a single EXE](https://github.com/Sqzzzzzzz/Cold-Steel-Save-Editor/releases/download/v1.0.1/Cold-Steel-I-Inventory-Editor-v1.0.1-windows-x64-onefile.zip). Extract `Cold_Steel_I_Inventory_Editor.exe` and run it. To verify the archive, compare `Get-FileHash -Algorithm SHA256 <archive.zip>` with the [SHA-256 checksum](https://github.com/Sqzzzzzzz/Cold-Steel-Save-Editor/releases/download/v1.0.1/SHA256SUMS-onefile.txt).
 
-The Windows ZIP includes the theme, original game artwork and the bilingual item catalog. Keep `_internal/assets` in place after extraction. The editor reads item IDs and limits from your Steam installation.
+The EXE includes the theme, original game artwork and bilingual item text. The editor reads item IDs and limits from your Steam installation.
 
 ## Using the editor
 
@@ -52,8 +52,8 @@ To restore a backup, open its `.bak` file with **Open manually** and use **Save 
 | Game directory not found | Choose the installation containing `ed8.exe` and `data/text/dat_us/t_item.tbl`. The editor also looks in additional libraries registered by Steam. |
 | No compatible save found | Open a version-8 Steam slot manually. Files such as `sdslot.dat`, thumbnails and autosave sidecars are separate from the save slot. |
 | Source changed or write access denied | Close the game, allow Steam Cloud to finish, and reopen the slot. You can also save a separate copy to a writable folder. |
-| Russian item names are placeholders | Extract the entire ZIP again and check that `_internal/assets/item-text.json` is present. |
-| Game artwork is missing | Extract the entire ZIP again, keeping `_internal/assets` next to the executable. |
+| Item names are placeholders | In **Tools → Scan game folder**, select the Steam game directory and check that the catalog loads. |
+| Game artwork is missing | Download the release ZIP again and run the extracted EXE. For the folder-based build, keep `_internal` next to the EXE. |
 
 ## Known limitations
 
@@ -65,7 +65,7 @@ To restore a backup, open its `.bak` file with **Open manually** and use **Save 
 
 ## Local artwork and item text
 
-The complete theme loads from `_internal/assets` in a binary build and from `assets` when running from source. The backdrop uses a [Heimdallr image from Nihon Falcom](https://www.falcom.co.jp/sen/world/show/ss39_l.jpg). The bilingual catalog, `assets/item-text.json`, is a UTF-8 object with `en` and `ru` maps. Each map uses decimal item IDs or references such as `fish:0` and `dlc:25` as keys, with `[name, description]` as values.
+The complete theme is embedded in the single-file EXE. It loads from `_internal/assets` in the folder-based build and from `assets` when running from source. The backdrop uses a [Heimdallr image from Nihon Falcom](https://www.falcom.co.jp/sen/world/show/ss39_l.jpg). The bilingual catalog, `assets/item-text.json`, is a UTF-8 object with `en` and `ru` maps. Each map uses decimal item IDs or references such as `fish:0` and `dlc:25` as keys, with `[name, description]` as values.
 
 To extract the supported menu and inventory art from your own installation for local use, run:
 
@@ -87,6 +87,8 @@ python -m venv .venv
 .\.venv\Scripts\python.exe package_release.py --tag v1.0.1
 .\.venv\Scripts\python.exe verify_package.py release/local --full-theme
 ```
+
+For a Windows ZIP containing a single executable, add `--onefile` to the build, package and verification commands. Verify the single-file ZIP in `release/onefile`. This build extracts its runtime files to a temporary directory when it starts. It reads the catalog from the installed Steam game.
 
 Installed-game UI tests run when the standard Steam installation is present. The Windows workflow also tests the GUI with synthetic records and starts the packaged executable with and without a synthetic save.
 

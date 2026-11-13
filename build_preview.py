@@ -22,6 +22,7 @@ ART = (
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--without-assets", action="store_true", help="Build without locally supplied game assets")
+    parser.add_argument("--onefile", action="store_true", help="Bundle the runtime and resources into one executable")
     args = parser.parse_args()
     assets = ROOT / "assets"
     if not args.without_assets:
@@ -53,11 +54,20 @@ def main() -> None:
 )""",
         encoding="utf-8",
     )
+    mode = "--onefile" if args.onefile else "--onedir"
+    dist = ROOT / "dist/onefile" if args.onefile else ROOT / "dist"
+    work = build / ("onefile-pyinstaller" if args.onefile else "preview-pyinstaller")
+    spec = work if args.onefile else build
     arguments = [
-        sys.executable, "-m", "PyInstaller", "--noconfirm", "--onedir", "--windowed",
-        "--name", NAME, "--specpath", str(build), "--version-file", str(version_resource),
-        "--workpath", str(ROOT / "build/preview-pyinstaller"), "--distpath", str(ROOT / "dist"),
+        sys.executable, "-m", "PyInstaller", "--noconfirm", mode, "--windowed",
+        "--name", NAME, "--specpath", str(spec), "--version-file", str(version_resource),
+        "--workpath", str(work), "--distpath", str(dist),
     ]
+    if args.onefile:
+        notices = [ROOT / "LICENSE", Path(sys.base_prefix) / "LICENSE.txt",
+                   *sorted((ROOT / "third_party").glob("*.txt")), ROOT / "third_party/README.md"]
+        for notice in notices:
+            arguments += ["--add-data", f"{notice};licenses"]
     if not args.without_assets:
         from PySide6.QtWidgets import QApplication
         from game_art import GameArt
