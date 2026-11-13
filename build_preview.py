@@ -12,8 +12,8 @@ from version import VERSION
 ROOT = Path(__file__).resolve().parent
 NAME = "Cold_Steel_I_Inventory_Editor"
 ART = (
-    "concept-backdrop.png", "item-text.json",
-    "academy-full.jpg", "thors.png", "logo.png", "item-atlas.png",
+    "heimdallr.jpg", "item-text.json",
+    "thors.png", "logo.png", "item-atlas.png",
     "master-atlas.png", "menu-atlas.png", "fish-art.png", "fish-icons.png", "special-art.png",
     "arcus-cover-art.png", "shining-pom.png", "arrow-up.png", "arrow-down.png",
 )

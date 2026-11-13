@@ -688,6 +688,7 @@ class MainWindow(QMainWindow):
         for key,ru,en in [('inventory','Инвентарь','Inventory'),
                           ('catalog','Каталог','Catalog'),('tools','Инструменты','Tools')]:
             self.navigation[key].setText(t(ru,en))
+            self.navigation[key].setToolTip(t(ru,en))
         self.btn_latest.setText(t('Последнее\nсохранение   F5','Latest\nsave   F5'))
         self.btn_open.setText(t('Открыть вручную\nCtrl+O','Open manually\nCtrl+O'))
         self.btn_compare.setText(t('Сравнить\nфайлы','Compare\nsaves'))
@@ -776,9 +777,12 @@ class MainWindow(QMainWindow):
         )
         for (btn,short,long),button_width in zip(pairs,widths):
             btn.setFixedWidth(button_width);btn.setText(self.msg(*(short if compact else long)))
-        for i,value in enumerate((62,109,82) if compact else (70,133,108),start=1):self.cat_table.setColumnWidth(i,value)
-        for i,value in enumerate((62,109,82) if compact else (70,133,108),start=1):self.inv_table.setColumnWidth(i,value)
-        for table in (self.cat_table,self.inv_table):table.verticalHeader().setDefaultSectionSize(30)
+        column_widths=(62,109,82) if compact else (70,133,108)
+        for table in (self.cat_table,self.inv_table):
+            header=table.horizontalHeader()
+            for column,width in enumerate(column_widths,start=1):
+                table.setColumnWidth(column,max(width,header.sectionSizeHint(column)))
+            table.verticalHeader().setDefaultSectionSize(30)
         self.footer_row.layout().setContentsMargins(rail+8,2,4,0)
         self.btn_latest.setToolTip(self.msg('Открыть последнее сохранение (F5)','Open latest save (F5)') if self.core.storage else
                                    self.msg('Загрузить учебный инвентарь (F5)','Load sample inventory (F5)'))

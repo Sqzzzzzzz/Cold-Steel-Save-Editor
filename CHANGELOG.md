@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Use a single Heimdallr backdrop across the editor.
+- Keep the catalog and inventory column headings readable in compact windows.
+- Record only additions in the Recently added category.
+
 ## 1.0.0
 
 - Browse the installed Cold Steel I Steam catalog, including fishing records and DLC listings.

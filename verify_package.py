@@ -9,7 +9,8 @@ import subprocess
 from tempfile import TemporaryDirectory
 from zipfile import ZipFile
 
-from build_preview import ART, NAME
+from build_preview import ART, NAME, ROOT
+from package_release import README_SCREENSHOTS
 from qt_backend import ITEM_TABLE
 from test_cs1 import make_save
 from version import VERSION
@@ -29,6 +30,9 @@ def verify(directory: Path, *, full_theme: bool, save: Path | None) -> None:
                 raise ValueError("Unexpected nested archive or test data in release.")
             files.extractall(root)
         bundle = root / NAME
+        for screenshot in README_SCREENSHOTS:
+            if (bundle / screenshot).read_bytes() != (ROOT / screenshot).read_bytes():
+                raise ValueError(f"Bundled screenshot differs from the release source: {screenshot}")
         exe = bundle / f"{NAME}.exe"
         binary = exe.read_bytes()
         pe = unpack_from("<I", binary, 0x3C)[0]

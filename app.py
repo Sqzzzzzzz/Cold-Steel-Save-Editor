@@ -81,7 +81,6 @@ def main() -> int:
                 window.isVisible() and window.cat_table.model().rowCount() > 0
                 and not window.centralWidget().texture.isNull()
                 and not window.rail_watermark.mark.isNull()
-                and not window.header.academy.isNull()
                 and not window._icon(0).isNull()
                 and all(0 in window.core.translations.get(language, {}) for language in ("ru", "en"))
                 and (args.save is None or window.core.source == args.save.resolve())

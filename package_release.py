@@ -12,6 +12,9 @@ from build_preview import ART, NAME, ROOT
 from version import VERSION
 
 
+README_SCREENSHOTS = (Path("docs/editor.png"), Path("docs/editor-ru.png"))
+
+
 def package(without_assets: bool, tag: str | None) -> tuple[Path, Path]:
     if tag is not None and tag != f"v{VERSION}":
         raise ValueError(f"Release tag {tag} does not match application version {VERSION}.")
@@ -44,6 +47,10 @@ def package(without_assets: bool, tag: str | None) -> tuple[Path, Path]:
         library.with_suffix(".unpacked").rename(library)
         for name in ("README.md", "LICENSE", "CHANGELOG.md"):
             shutil.copyfile(ROOT / name, staged / name)
+        for screenshot in README_SCREENSHOTS:
+            destination = staged / screenshot
+            destination.parent.mkdir(exist_ok=True)
+            shutil.copyfile(ROOT / screenshot, destination)
         notices = staged / "third_party"
         shutil.copytree(ROOT / "third_party", notices)
         shutil.copyfile(Path(sys.base_prefix) / "LICENSE.txt", notices / "Python-LICENSE.txt")

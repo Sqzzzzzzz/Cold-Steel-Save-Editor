@@ -374,7 +374,8 @@ class EditorCore:
         if candidate != before:
             self.undo_stack.append(before)
             self.save.quantities = candidate
-            self.recent = list(dict.fromkeys((*changes, *self.recent)))[:24]
+            added = (item_id for item_id in changes if item_id in candidate and item_id not in before)
+            self.recent = list(dict.fromkeys((*added, *self.recent)))[:24]
             self._persist_lists()
 
     def undo(self) -> bool:

@@ -1,7 +1,6 @@
 """Painted HUD chrome around real, accessible Qt controls.
 
-No screenshot is used as an interface. All coordinates are logical Qt pixels;
-the scene and academy banner are rendered once per size and device scale.
+The window backdrop is rendered once per size and device scale.
 """
 from __future__ import annotations
 
@@ -151,8 +150,10 @@ class HudButton(QPushButton):
         icon_size=34 if nav else 31 if role.startswith('toolbar') else 23
         gap=14 if left else 12
         text_width=max((p.fontMetrics().horizontalAdvance(line) for line in text.split('\n')),default=0)
-        if left:x=24 if nav else 19
-        else:x=max(9,(self.width()-text_width-(icon_size+gap if not icon.isNull() else 0))//2)
+        icon_width=icon_size+gap if not icon.isNull() else 0
+        if nav:x=16 if self.width()<185 else 24
+        elif left:x=19
+        else:x=max(9,(self.width()-text_width-icon_width)//2)
         if not icon.isNull():
             icon.paint(p,QRect(x,(self.height()-icon_size)//2,icon_size,icon_size),mode=QIcon.Mode.Normal if self.isEnabled() else QIcon.Mode.Disabled)
             x+=icon_size+gap
@@ -192,7 +193,10 @@ class AngularTab(QPushButton):
 class Backdrop(QWidget):
     def __init__(self,parent=None):
         super().__init__(parent)
-        self.texture=QPixmap(str(ASSETS / 'concept-backdrop.png'))
+        self.texture=QPixmap(str(ASSETS / 'heimdallr.jpg'))
+        if not self.texture.isNull():
+            # Remove the black letterbox baked into the Falcom screenshot.
+            self.texture=self.texture.copy(self.texture.rect().adjusted(0,12,0,-13))
         self._scene=QPixmap()
         self._scene_key=None
         self.setAutoFillBackground(False)
@@ -220,10 +224,14 @@ class Backdrop(QWidget):
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             painter.drawPixmap(QRectF(self.rect()),self.texture,crop)
         shade=QLinearGradient(0,0,0,self.height())
-        shade.setColorAt(0,QColor(22,32,48,126))
-        shade.setColorAt(.48,QColor(19,29,45,96))
-        shade.setColorAt(1,QColor(13,21,33,159))
+        shade.setColorAt(0,QColor(17,26,42,189))
+        shade.setColorAt(.45,QColor(18,27,41,196))
+        shade.setColorAt(1,QColor(13,20,32,225))
         painter.fillRect(self.rect(),shade)
+        left=QLinearGradient(0,0,self.width()*.34,0)
+        left.setColorAt(0,QColor(14,22,35,94))
+        left.setColorAt(1,QColor(14,22,35,0))
+        painter.fillRect(self.rect(),left)
         painter.end()
 
 
@@ -258,9 +266,9 @@ class GlassPanel(QFrame):
         if r.width()<30 or r.height()<30:p.end();return
         path=bevel(r,24 if self.kind=='dark' else 16)
         grad=QLinearGradient(0,0,r.width(),r.height())
-        grad.setColorAt(0,QColor(30,38,52,248 if self.kind=='dark' else 240))
-        grad.setColorAt(.52,QColor(26,31,42,250))
-        grad.setColorAt(1,QColor(36,40,53,246))
+        grad.setColorAt(0,QColor(30,38,52,220 if self.kind=='dark' else 204))
+        grad.setColorAt(.52,QColor(26,31,42,226))
+        grad.setColorAt(1,QColor(36,40,53,216))
         p.fillPath(path,grad)
         p.setPen(QPen(QColor(25,20,24,230),5));p.drawPath(path)
         p.setPen(QPen(QColor('#BFC8D9'),1.4));p.drawPath(path)
@@ -400,48 +408,6 @@ class ItemTitle(QLabel):
 
 
 class HudTitleBar(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.academy = QPixmap(str(ASSETS / 'academy-full.jpg'))
-        self._academy_banner = QPixmap()
-        self._banner_key = None
-
-    def _render_banner(self, dpr):
-        if self.academy.isNull():
-            return
-        width = math.ceil(max(360, int(self.width() * 0.63)) * dpr)
-        height = math.ceil(max(1, self.height() - 1) * dpr)
-        scaled = self.academy.scaled(
-            width, height, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        banner = QPixmap(width, height)
-        banner.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(banner)
-        y = int((scaled.height() - height) * 0.54)
-        painter.drawPixmap(banner.rect(), scaled, QRect(0, y, width, height))
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
-        fade = QLinearGradient(0, 0, width, 0)
-        for position, alpha in ((0, 0), (0.18, 48), (0.52, 150), (1, 72)):
-            fade.setColorAt(position, QColor(255, 255, 255, alpha))
-        painter.fillRect(banner.rect(), fade)
-        painter.end()
-        banner.setDevicePixelRatio(dpr)
-        self._academy_banner = banner
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        dpr=self.devicePixelRatioF()
-        key=(self.size(),dpr)
-        if key!=self._banner_key:
-            self._render_banner(dpr)
-            self._banner_key=key
-        painter = QPainter(self)
-        painter.fillRect(self.rect().adjusted(0, 0, 0, -1), QColor(18, 25, 40, 83))
-        if not self._academy_banner.isNull():
-            x=self.width()-self._academy_banner.deviceIndependentSize().width()
-            painter.drawPixmap(QPointF(x,0),self._academy_banner)
-
     def mousePressEvent(self,event):
         if event.button()==Qt.MouseButton.LeftButton:
             handle=self.window().windowHandle()

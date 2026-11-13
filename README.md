@@ -10,7 +10,7 @@ A Windows inventory editor for **The Legend of Heroes: Trails of Cold Steel I** 
 
 ![Russian item catalog showing the fishing journal](docs/editor-ru.png)
 
-*Both screenshots show the editor's in-memory demo inventory.*
+*Both screenshots show the interface on the main branch with the editor's in-memory demo inventory.*
 
 ## Features
 
@@ -65,7 +65,7 @@ To restore a backup, open its `.bak` file with **Open manually** and use **Save 
 
 ## Local artwork and item text
 
-The complete theme loads from `_internal/assets` in a binary build and from `assets` when running from source. The bilingual catalog, `assets/item-text.json`, is a UTF-8 object with `en` and `ru` maps. Each map uses decimal item IDs or references such as `fish:0` and `dlc:25` as keys, with `[name, description]` as values.
+The complete theme loads from `_internal/assets` in a binary build and from `assets` when running from source. The backdrop uses a [Heimdallr image from Nihon Falcom](https://www.falcom.co.jp/sen/world/show/ss39_l.jpg). The bilingual catalog, `assets/item-text.json`, is a UTF-8 object with `en` and `ru` maps. Each map uses decimal item IDs or references such as `fish:0` and `dlc:25` as keys, with `[name, description]` as values.
 
 To extract the supported menu and inventory art from your own installation for local use, run:
 

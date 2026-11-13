@@ -126,7 +126,45 @@ class PreviewTests(TestCase):
             self.assertEqual([path.name for path in root.iterdir()], ["settings.ini"])
 
 
+    def test_recent_items_records_additions_only(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = QSettings(str(root / "settings.ini"), QSettings.Format.IniFormat)
+            core = EditorCore(profile=profile)
+            potion = CatalogItem("Potion", "Restores health", "items", 99, 0x81, 0)
+            core.apply_scan_result(ScanResult(root, (), dict.fromkeys(range(4), potion)))
+            self.assertEqual(set(core.save.quantities), {0, 1, 2})
+            core.change({0: 0, 1: 9, 2: core.quantity(2), 3: 2})
+            self.assertEqual(core.recent, [3])
+            core.change({3: 5, 0: 2})
+            self.assertEqual(core.recent, [0, 3])
+            self.assertEqual(EditorCore(profile=profile).recent, [0, 3])
+
+
 class CleanWindowTests(TestCase):
+    def test_compact_table_headers_fit_in_both_languages(self):
+        app = QApplication.instance() or QApplication([])
+        with TemporaryDirectory() as directory:
+            profile = QSettings(str(Path(directory) / "settings.ini"), QSettings.Format.IniFormat)
+            window = MainWindow(EditorCore(profile=profile))
+            window.initial_load_timer.stop()
+            try:
+                window.resize(1280, 720)
+                window.show()
+                for language in (0, 1):
+                    window.lang.setCurrentIndex(language)
+                    for section, table in (("catalog", window.cat_table), ("inventory", window.inv_table)):
+                        window.navigate_section(section)
+                        header = table.horizontalHeader()
+                        for column in range(header.count()):
+                            window.sort_rows(section, column)
+                            app.processEvents()
+                            with self.subTest(language=language, section=section, column=column):
+                                self.assertGreaterEqual(table.columnWidth(column), header.sectionSizeHint(column))
+            finally:
+                window.close()
+                app.processEvents()
+
     def test_catalog_and_language_switch_with_a_synthetic_table(self):
         app = QApplication.instance() or QApplication([])
         with TemporaryDirectory() as directory:
@@ -512,7 +550,9 @@ class NativeWindowTests(TestCase):
         item_id = next(i for i, item in self.core.native.items() if item.editable and item.stats and item.stats[0])
         table.selectRow(table.model().index_for_id(item_id).row())
         item = self.core.native[item_id]
-        self.assertIn(item.description.strip(), window.description.toPlainText())
+        description = self.core.details_text(item_id)
+        self.assertTrue(description)
+        self.assertIn(description.strip(), window.description.toPlainText())
         self.assertIn(f"STR +{item.stats[0]}", window.description.toPlainText())
         self.assertFalse(window.big_icon.pixmap().isNull())
         for item_id, stat in ((120, "ACC +20%"), (1001, "EVA +5%")):
