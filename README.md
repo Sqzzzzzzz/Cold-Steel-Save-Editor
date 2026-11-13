@@ -84,7 +84,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
 .\.venv\Scripts\python.exe -m unittest discover -v
 .\.venv\Scripts\python.exe build_preview.py
-.\.venv\Scripts\python.exe package_release.py --tag v1.0.0
+.\.venv\Scripts\python.exe package_release.py --tag v1.0.1
 .\.venv\Scripts\python.exe verify_package.py release/local --full-theme
 ```
 

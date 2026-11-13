@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.1
 
 - Use a single Heimdallr backdrop across the editor.
 - Keep the catalog and inventory column headings readable in compact windows.
