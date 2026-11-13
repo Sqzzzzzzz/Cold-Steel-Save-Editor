@@ -2,14 +2,16 @@ from pathlib import Path
 import os
 from struct import pack, pack_into
 from tempfile import TemporaryDirectory
-from unittest import TestCase
+from unittest import TestCase, skipUnless
 from unittest.mock import patch
 
 from cs1 import (
     CatalogItem, EMPTY_RECORD, INVENTORY_END, INVENTORY_OFFSET, ORBMENTS_OFFSET,
     RECORD, SAVE_HEADER, SAVE_SIZE, SLOTS, Save, publish_new, read_catalog,
+    replace_with_backup,
 )
 from save_storage import SteamSaveStorage
+from item_catalog import read_dlc_packs, read_fishing_notebook
 
 
 POTION = CatalogItem("Tear Balm", "Restores 800 HP", "items", 99, 0x81, 0)
@@ -57,6 +59,10 @@ class SaveTests(TestCase):
         with self.assertRaisesRegex(ValueError, "equipped"):
             save.set_quantity(2000, 1, MASTER)
         self.assertFalse(save.changed)
+        equipped_and_owned = Save(make_save((2000, 1)))
+        with self.assertRaisesRegex(ValueError, "equipped"):
+            equipped_and_owned.set_quantity(2000, 0, MASTER)
+        self.assertEqual(equipped_and_owned.items[2000], 1)
 
     def test_reject_wrong_game_duplicate_and_nonempty_after_padding(self):
         for data in (bytes(SAVE_SIZE), make_save((0, 1), (0, 2)), make_save((9999, 0), (0, 1))):
@@ -120,6 +126,65 @@ class SaveTests(TestCase):
             backup, = path.parent.glob("*.bak")
             self.assertEqual(backup.read_bytes(), original)
 
+    @skipUnless(os.name == "nt", "Windows replacement semantics")
+    def test_in_place_writer_is_blocked_during_replacement(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "save001.dat"
+            original = make_save((0, 2))
+            path.write_bytes(original)
+            save = Save.open(path)
+            save.set_quantity(0, 5, POTION)
+
+            def competing_write(target, temporary, displaced):
+                with self.assertRaises(PermissionError):
+                    target.write_bytes(make_save((0, 9)))
+                replace_with_backup(target, temporary, displaced)
+
+            with patch("cs1.replace_with_backup", side_effect=competing_write):
+                backup = save.write(path, original_path=True)
+            self.assertEqual(backup.read_bytes(), original)
+            self.assertEqual(Save.open(path).items, {0: 5})
+
+    @skipUnless(os.name == "nt", "Windows replacement semantics")
+    def test_concurrent_rename_is_preserved_for_recovery(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "save001.dat"
+            original, concurrent = make_save((0, 2)), make_save((0, 9))
+            path.write_bytes(original)
+            rival = root / "rival.dat"
+            rival.write_bytes(concurrent)
+            save = Save.open(path)
+            save.set_quantity(0, 5, POTION)
+
+            def competing_rename(target, temporary, displaced):
+                replace_with_backup(target, rival, root / "competing-original.dat")
+                replace_with_backup(target, temporary, displaced)
+
+            with patch("cs1.replace_with_backup", side_effect=competing_rename):
+                with self.assertRaisesRegex(ValueError, "concurrent save was preserved"):
+                    save.write(path, original_path=True)
+            self.assertCountEqual([backup.read_bytes() for backup in root.glob("*.bak")], [original, concurrent])
+
+    @skipUnless(os.name == "nt", "Windows replacement semantics")
+    def test_failed_replacement_restores_a_displaced_slot(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "save001.dat"
+            original = make_save((0, 2))
+            path.write_bytes(original)
+            save = Save.open(path)
+            save.set_quantity(0, 5, POTION)
+
+            def failed_after_displacement(target, temporary, displaced):
+                os.rename(target, displaced)
+                raise OSError("replacement failed")
+
+            with patch("cs1.replace_with_backup", side_effect=failed_after_displacement):
+                with self.assertRaisesRegex(OSError, "replacement failed"):
+                    save.write(path, original_path=True)
+            self.assertEqual(path.read_bytes(), original)
+            self.assertTrue(all(backup.read_bytes() == original for backup in path.parent.glob("*.bak")))
+
 
 class SteamStorageTests(TestCase):
     def test_latest_skips_incompatible_slots_and_sidecars(self):
@@ -158,9 +223,35 @@ class SteamStorageTests(TestCase):
 
 
 class CatalogTests(TestCase):
+    def test_dlc_packs_use_separate_ids_and_ignore_stale_record_lengths(self):
+        header = b"dlc\0\0\0" + pack("<H", 25) + b"EDSENADDCONT0025\0EDSENNOKISEKIDLC\0"
+        record = header + b"Free Trial Pack\0Includes healing items and quartz.\0"
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "t_dlc.tbl"
+            path.write_bytes(pack("<H", 1) + record)
+            self.assertEqual(read_dlc_packs(path), {"dlc:25": ("Free Trial Pack", "Includes healing items and quartz.")})
+            for broken in (pack("<H", 1) + record[:-1], pack("<H", 2) + record * 2):
+                path.write_bytes(broken)
+                with self.assertRaisesRegex(ValueError, "Invalid Cold Steel I DLC table"):
+                    read_dlc_packs(path)
+
+    def test_fishing_notebook_uses_distinct_read_only_keys(self):
+        def record(index, name, description):
+            return b"QSFish\0\0\0" + pack("<H", index) + name + b"\0" + bytes(96) + description + b"\0"
+
+        data = pack("<H", 2) + record(24, b"Record", b"") + record(0, b"Swordtail", b"A small fish.")
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "t_notefish.tbl"
+            path.write_bytes(data)
+            self.assertEqual(read_fishing_notebook(path), {"fish:0": ("Swordtail", "A small fish.")})
+            path.write_bytes(data[:-1])
+            with self.assertRaisesRegex(ValueError, "Invalid Cold Steel I fishing notebook"):
+                read_fishing_notebook(path)
+
     def test_reads_id_zero_and_actual_stack_limit_even_with_stale_record_length(self):
         metadata = bytearray(46)
         metadata[0] = 0x81
+        metadata[15:35] = pack("<10H", 12, 0, 0, 0, 0, 0, 3, 0, 200, 0)
         metadata[39] = 7
         data = pack("<H", 1) + b"item\0\0\0" + bytes(4) + b"SL\0" + metadata
         data += b"Tear Balm\0#32IRestores 800 HP\0"
@@ -169,6 +260,10 @@ class CatalogTests(TestCase):
             path.write_bytes(data)
             item = read_catalog(path)[0]
             self.assertEqual((item.name, item.description, item.limit), ("Tear Balm", "Restores 800 HP", 7))
+            self.assertEqual(item.stats, (12, 0, 0, 0, 0, 0, 3, 0, 200, 0))
             path.write_bytes(data[:-1])
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, "Invalid Cold Steel I item table"):
+                read_catalog(path)
+            path.write_bytes(data.replace(b"Tear Balm", b"\xffear Balm"))
+            with self.assertRaisesRegex(ValueError, "Invalid Cold Steel I item table"):
                 read_catalog(path)

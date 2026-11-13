@@ -100,8 +100,8 @@ class FirstLaunchPage(QScrollArea):
                              'Load the item catalog, then open a Cold Steel I save.'))
         self.catalog_title.setText(t('Каталог предметов','Item catalog'))
         self.save_title.setText(t('Учебный инвентарь','Sample inventory') if demo else t('Сохранение Steam','Steam save'))
-        self.catalog_text.setText(t('Названия и описания будут прочитаны из установленной игры.',
-                                    'Item names and descriptions are read from your installed game.'))
+        self.catalog_text.setText(t('Редактор загрузит данные предметов из игры и покажет их на выбранном языке.',
+                                    'The editor loads item data from the game and displays it in the selected language.'))
         self.save_text.setText(t('Образец использует предметы из установленной игры. Правки хранятся в памяти.',
                                  'The sample uses items from your installed game. Edits are kept in memory.') if demo else
                                t('Выберите слот .dat. При перезаписи редактор сохранит резервную копию рядом с файлом.',

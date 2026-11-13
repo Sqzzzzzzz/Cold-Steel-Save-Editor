@@ -6,32 +6,38 @@ mouse movement never causes catalog re-population or wallpaper rescaling.
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from itertools import groupby
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QSize, QRectF, QRect, QPoint, QPointF, Signal, Slot, QObject, QThread, QSignalBlocker, QUrl
-from PySide6.QtGui import QColor, QPainter, QPen, QFont, QFontMetrics, QPolygonF, QPixmap, QIcon, QPainterPath, QLinearGradient, QBrush, QRadialGradient, QDesktopServices
+from PySide6.QtCore import Qt, QTimer, QSize, QRectF, QRect, QPoint, QPointF, Signal, Slot, QObject, QThread, QSignalBlocker, QUrl, QEvent, QItemSelection, QItemSelectionModel, QLibraryInfo, QTranslator
+from PySide6.QtGui import QColor, QPainter, QPen, QFont, QFontMetrics, QPolygonF, QPixmap, QIcon, QPainterPath, QLinearGradient, QBrush, QRadialGradient, QDesktopServices, QPixmapCache
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QLabel, QPushButton, QLineEdit,
-    QSpinBox, QComboBox, QCheckBox, QTreeWidget, QTreeWidgetItem, QTableWidget,
-    QTableWidgetItem, QHeaderView, QAbstractItemView, QHBoxLayout, QVBoxLayout,
+    QSpinBox, QComboBox, QCheckBox, QTreeWidget, QTreeWidgetItem, QTableView,
+    QHeaderView, QAbstractItemView, QHBoxLayout, QVBoxLayout,
     QGridLayout, QStackedWidget, QMessageBox, QFileDialog, QScrollArea,
     QPlainTextEdit, QSizePolicy, QStyle, QStatusBar, QSizeGrip
 )
 
 from categories import GROUPS, CATEGORY_NAMES, category_of, item_in_category
-from qt_backend import EditorCore, find_game_install, scan_game_tables
-from game_art import ASSETS, GameArt
+from qt_backend import EditorCore, find_game_install, read_english_catalog, scan_game_tables, write_csv
+from game_art import ASSETS, SHINING_POM_BAIT_ID, shared_game_art
 from edit_changes import EditChanges
+from qt_inventory_model import InventoryModel, ItemRow
 from qt_first_launch import FirstLaunchPage
 from qt_errors import error_text
 from save_storage import SteamSaveStorage
-VERSION = "0.2.0"
+from item_catalog import NOTEBOOK_IDS, STAT_NAMES
+from version import VERSION
 APP_NAME = "Cold Steel I Inventory Editor"
 SAVE_FILTER = "Cold Steel I (*.dat *.bak)"
+STAT_NAMES_RU = ("СИЛ", "ЗАЩ", "СА", "ЗА", "ТЧН", "УКЛ", "СКР", "ХОД", "ОЗ", "ОЭ")
 
 
-from qt_hud_widgets import (hud_icon, HudButton, Backdrop, GlassPanel, AngularTab,
+from qt_hud_widgets import (hud_icon, HudButton, HudCheckBox, Backdrop, RailWatermark, GlassPanel, AngularTab,
                             HudTableDelegate, HudTitleBar, ItemTitle, ElideLabel)
 
 
@@ -97,7 +103,7 @@ class HudSectionHeader(QWidget):
 class ScanWorker(QObject):
     stage=Signal(str)
     result=Signal(object)
-    error=Signal(str)
+    error=Signal(object)
     finished=Signal()
     def __init__(self,controller,path=None):
         super().__init__();self.preferred_root=controller.settings.get('game_root','');self.path=path
@@ -109,7 +115,7 @@ class ScanWorker(QObject):
             if root is None: raise FileNotFoundError('Game directory not found')
             self.stage.emit('reading')
             self.result.emit(scan_game_tables(root))
-        except Exception as exc:self.error.emit(str(exc))
+        except Exception as exc:self.error.emit(exc)
         finally:self.finished.emit()
 
 
@@ -118,7 +124,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.core=core if core is not None else EditorCore(storage=SteamSaveStorage())
         self.setWindowTitle(f'{APP_NAME} v{VERSION}')
-        self.art = GameArt()
+        self.art = shared_game_art()
         self.setWindowIcon(self.art.menu_icon('inventory'))
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self.resize(1536,864);self.setMinimumSize(1280,720)
@@ -129,12 +135,16 @@ class MainWindow(QMainWindow):
         self.sort_keys={'catalog':(1,False),'inventory':(1,False)}
         self.scan_thread=None
         self.scan_worker=None
+        self._file_pool=ThreadPoolExecutor(max_workers=1,thread_name_prefix='cs1-file')
+        self._file_job=None
+        self._file_complete=None
+        self._close_after_work=False
         self._startup_dismissed=False
         self._startup_forced=False
         self._scan_busy=False
         self._scan_stage=''
         self._scan_error=''
-        self._scan_error_details=''
+        self._scan_error_details=('','')
         self._scan_warning_count=0
         self._scan_succeeded=False
         self._scan_started_in_setup=False
@@ -142,30 +152,39 @@ class MainWindow(QMainWindow):
         self._icon_pixmaps={}
         self._category_icons={}
         self._category_nodes={'catalog':{},'inventory':{}}
-        self._table_rows={}
         self._view_catalog=None
         self._view_english=None
         self._view_language=None
+        self._startup_state=None
         self._visible_catalog={}
         self._search_details={}
         self._row_names={}
+        self._search_names={}
+        self._item_rows={}
+        self.search_debounce={}
         self.edit_changes=EditChanges()
         self.cat_favorites_only=False
         self.inv_favorites_only=False
         self._quantity_user_edited=False
         self.language=self.core.language
+        self._qt_translation=QTranslator(self)
+        self._apply_qt_language()
         self._qt_setup()
         self.make_ui()
         self.retranslate()
         self.populate_categories()
         self.update_tables()
+        self.show_item(None)
         self.show_section('catalog')
         self.resize_grip=QSizeGrip(self);self.resize_grip.setFixedSize(16,16)
-        self.resize_grip.setToolTip('Потяни для изменения размера / Drag to resize')
+        self.resize_grip.setToolTip(self.msg('Потяните, чтобы изменить размер окна','Drag to resize the window'))
+        self.file_timer=QTimer(self)
+        self.file_timer.setInterval(16)
+        self.file_timer.timeout.connect(self._finish_file_job)
         self.initial_load_timer=QTimer(self)
         self.initial_load_timer.setSingleShot(True)
         self.initial_load_timer.timeout.connect(self.initial_load)
-        self.initial_load_timer.start(360)
+        self.initial_load_timer.start(0)
 
     def _qt_setup(self):
         from qt_hud_theme import HUD_STYLESHEET
@@ -191,17 +210,15 @@ class MainWindow(QMainWindow):
         self.header=HudTitleBar();self.header.setObjectName('titleBar');self.header.setFixedHeight(96)
         self.header.setAttribute(Qt.WidgetAttribute.WA_StyledBackground,True)
         hl=QHBoxLayout(self.header);hl.setContentsMargins(16,8,0,8)
-        crest = glass_label()
-        crest.setFixedSize(125, 78)
-        crest.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        crest.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        emblem = QPixmap(str(ASSETS / 'thors.png'))
-        if not emblem.isNull():
-            crest.setPixmap(emblem.scaled(74, 74, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-        else:
-            crest.setText('THORS')
-        crest.setAccessibleName('Thors Military Academy')
-        hl.addWidget(crest)
+        self.crest = glass_label()
+        self.crest.setFixedSize(125, 78)
+        self.crest.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.crest.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.crest.setAccessibleName('Thors Military Academy')
+        self.emblem_art = QPixmap(str(ASSETS / 'thors.png'))
+        if self.emblem_art.isNull():
+            self.crest.setText('THORS')
+        hl.addWidget(self.crest)
         branding=QVBoxLayout();branding.setSpacing(0)
         self.title=glass_label('Редактор сохранений','title',30)
         self.title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -209,16 +226,16 @@ class MainWindow(QMainWindow):
         self.subtitle.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         branding.addWidget(self.title);branding.addWidget(self.subtitle)
         hl.addLayout(branding,1)
-        logo = QPixmap(str(ASSETS / 'logo.png'))
-        if not logo.isNull():
+        self.logo_art = QPixmap(str(ASSETS / 'logo.png'))
+        if not self.logo_art.isNull():
             from PySide6.QtGui import QRegion
-            visible = QRegion(logo.mask()).boundingRect()
+            visible = QRegion(self.logo_art.mask()).boundingRect()
             if not visible.isEmpty():
-                logo = logo.copy(visible)
-            mark = glass_label()
-            mark.setPixmap(logo.scaled(151, 62, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-            mark.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-            hl.addWidget(mark)
+                self.logo_art = self.logo_art.copy(visible)
+            self.logo = glass_label()
+            self.logo.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            hl.addWidget(self.logo)
+        self._refresh_branding_art()
         controls=QVBoxLayout();controls.setSpacing(6)
         window_controls=QHBoxLayout();window_controls.setSpacing(1)
         self.window_buttons={}
@@ -271,10 +288,13 @@ class MainWindow(QMainWindow):
             b.setIcon(hud_icon(key,38));b.setIconSize(QSize(38,38))
             b.clicked.connect(lambda checked=False,k=key:self.navigate_section(k))
             self.navigation[key]=b;rl.addWidget(b)
-        rl.addStretch(1)
-        self.rail_file=glass_label('saveXXX.dat','muted',10)
-        self.rail_folder=glass_label('','muted',10)
-        self.rail_folder.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Preferred)
+        self.rail_watermark=RailWatermark()
+        rl.addWidget(self.rail_watermark,1)
+        self.rail_file=ElideLabel()
+        self.rail_folder=ElideLabel(mode=Qt.TextElideMode.ElideMiddle)
+        for label in (self.rail_file,self.rail_folder):
+            label.setProperty('role','muted')
+            label.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Preferred)
         self.rail_date=glass_label('--.--.----','muted',10)
         self.rail_state=glass_label('','muted',10)
         for widget,icon in [(self.rail_file,'save'),(self.rail_folder,'open'),(self.rail_date,'clock'),(self.rail_state,'check')]:
@@ -316,17 +336,16 @@ class MainWindow(QMainWindow):
         self.help_button=add_button('',lambda:self.show_report(self.msg('Клавиши и работа с редактором','Editor help'),[
             'F5 — '+(self.msg('последнее сохранение','latest save') if self.core.storage else
                        self.msg('учебный инвентарь','sample inventory')),
-            'Ctrl+O — '+self.msg('диалог открытия','open dialog'),
+            'Ctrl+O — '+self.msg('открыть сохранение','open a save'),
             'Ctrl+S — '+self.msg('сохранить копию','save a copy'),
             'Ctrl+Z — '+self.msg('отменить изменение','undo edit'),
             'Ctrl+F — '+self.msg('поиск в каталоге','catalog search'),
-            self.msg('Правый клик по количеству — 1 / 10 / 50 / 99.','Right-click quantity for 1 / 10 / 50 / 99.'),
+            self.msg('Щёлкните правой кнопкой по полю количества, чтобы выбрать значение.',
+                     'Right-click the quantity field to choose a preset.'),
         ],count=False),'window')
         self.help_button.setIcon(hud_icon('help'));self.help_button.setFixedSize(32,32)
         self.help_button.setToolTip('Справка');fl.addWidget(self.help_button)
         entire.addWidget(self.footer_row)
-        self.search_debounce=QTimer(self);self.search_debounce.setSingleShot(True);self.search_debounce.setInterval(140)
-        self.search_debounce.timeout.connect(self.update_tables)
         self.notice=QLabel(canvas);self.notice.setObjectName('toastNotice')
         self.notice.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents,True)
         self.notice.setWordWrap(True);self.notice.hide()
@@ -363,9 +382,9 @@ class MainWindow(QMainWindow):
         return tree
 
     def _make_table(self,kind):
-        headers=['Предмет','ID','Категория','В инвентаре']
-        table=QTableWidget(0,4)
-        table.setHorizontalHeaderLabels(headers)
+        table=QTableView()
+        table.setObjectName('inventoryTable')
+        table.setModel(InventoryModel(self._icon, self.msg, table))
         table.setSortingEnabled(False)
         table.verticalHeader().hide()
         table.horizontalHeader().setStretchLastSection(False)
@@ -387,30 +406,34 @@ class MainWindow(QMainWindow):
         table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         table.setWordWrap(False)
-        table.itemSelectionChanged.connect(lambda:self.selection_changed(table))
+        selection = table.selectionModel()
+        selection.selectionChanged.connect(lambda *_: self.selection_changed(table))
+        selection.currentRowChanged.connect(lambda *_: self._sync_selection(table))
         table.horizontalHeader().sectionClicked.connect(lambda col:self.sort_rows(kind,col))
-        table.model().layoutChanged.connect(lambda:self._table_rows.pop(kind,None))
         return table
 
-    def _searchbar(self,placeholder):
-        inp=QLineEdit();inp.setPlaceholderText(placeholder)
+    def _searchbar(self,kind):
+        inp=QLineEdit()
         inp.addAction(hud_icon('search',22),QLineEdit.ActionPosition.LeadingPosition)
         inp.setClearButtonEnabled(True)
         inp.setFixedHeight(37)
-        inp.textChanged.connect(lambda _text:self.search_debounce.start())
+        timer=QTimer(inp);timer.setSingleShot(True);timer.setInterval(100)
+        timer.timeout.connect(lambda:self.update_tables(kind))
+        inp.textChanged.connect(lambda _text:timer.start())
+        self.search_debounce[kind]=timer
         return inp
 
     def _make_catalog(self):
         page=QWidget();row=QHBoxLayout(page);row.setContentsMargins(0,0,0,0);row.setSpacing(10)
         row.addWidget(self._make_categories())
         content=QVBoxLayout();content.setSpacing(5)
-        self.cat_search=self._searchbar('Поиск по названию, ID или описанию…')
+        self.cat_search=self._searchbar('catalog')
         search_row=QHBoxLayout();search_row.setSpacing(5);search_row.addWidget(self.cat_search,1)
         self.cat_quick_favorite=add_button('★',lambda:self.toggle_quick_favorites('catalog'),'quick')
         self.cat_quick_favorite.setCheckable(True);self.cat_quick_favorite.setFixedSize(39,37)
         search_row.addWidget(self.cat_quick_favorite);content.addLayout(search_row)
         filters=QHBoxLayout();filters.setSpacing(8)
-        self.missing=QCheckBox('Только отсутствующие');self.present=QCheckBox('Только имеющиеся')
+        self.missing=HudCheckBox('Только отсутствующие');self.present=QCheckBox('Только имеющиеся')
         self.missing.toggled.connect(self._only_missing);self.present.toggled.connect(self._only_present)
         filters.addWidget(self.missing);filters.addStretch(1)
         from PySide6.QtWidgets import QMenu
@@ -428,10 +451,18 @@ class MainWindow(QMainWindow):
             action=menu.addAction(text);action.setCheckable(True);source_group.addAction(action)
             self.source_actions.append(action)
             action.setChecked(index==0);action.triggered.connect(lambda checked=False,i=index:self.source.setCurrentIndex(i))
-        self.source.currentIndexChanged.connect(lambda _i:self.update_tables())
+        self.source.currentIndexChanged.connect(lambda _i:self.update_tables('catalog'))
         self.filter_button.setMenu(menu);filters.addWidget(self.filter_button);content.addLayout(filters)
         self.catalog_counter=glass_label('','muted',9);self.catalog_counter.setObjectName('catalogCounter');self.catalog_counter.hide()
         self.cat_table=self._make_table('catalog');content.addWidget(self.cat_table,1)
+        self.catalog_empty=glass_label('','muted',10)
+        self.catalog_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.catalog_empty.setWordWrap(True)
+        self.catalog_empty.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        empty_layout=QVBoxLayout(self.cat_table.viewport())
+        empty_layout.setContentsMargins(16,12,16,12)
+        empty_layout.addWidget(self.catalog_empty)
+        self.catalog_empty.hide()
         self.bulk_bar=QWidget();bulk=QHBoxLayout(self.bulk_bar);bulk.setContentsMargins(0,1,0,0);bulk.setSpacing(5)
         self.selection_info=glass_label('Выбрано: 0','muted',10);bulk.addWidget(self.selection_info);bulk.addStretch(1)
         self.add_one=add_button('+1 каждому',lambda:self.apply_bulk(1))
@@ -444,7 +475,7 @@ class MainWindow(QMainWindow):
         page=QWidget();row=QHBoxLayout(page);row.setContentsMargins(0,0,0,0);row.setSpacing(10)
         row.addWidget(self._make_categories('inventory'))
         l=QVBoxLayout();l.setContentsMargins(0,0,0,0);l.setSpacing(5)
-        self.inv_search=self._searchbar('Поиск по названию, ID или описанию…')
+        self.inv_search=self._searchbar('inventory')
         search_row=QHBoxLayout();search_row.setSpacing(5);search_row.addWidget(self.inv_search,1)
         self.inv_quick_favorite=add_button('★',lambda:self.toggle_quick_favorites('inventory'),'quick')
         self.inv_quick_favorite.setCheckable(True);self.inv_quick_favorite.setFixedSize(39,37)
@@ -468,7 +499,7 @@ class MainWindow(QMainWindow):
           ('Сохранения', [('Последнее сохранение' if self.core.storage else 'Учебный инвентарь',self.load_latest),
              ('Открыть вручную',self.open_save_dialog),
              ('Папка сохранений',self.open_save_dir),('Просмотр правок',self.show_changes),('Сравнить два файла',self.compare_dialog)]),
-          ('Игра и DLC',[('Сканировать папку игры',self.choose_game),('Автопоиск игры',lambda:self.scan_game(None)),('Начало работы',self.show_startup)]),
+          ('Игра и дополнения',[('Сканировать папку игры',self.choose_game),('Автопоиск игры',lambda:self.scan_game(None)),('Начало работы',self.show_startup)]),
           ('Каталог и диагностика',[('Импорт английского каталога',self.import_english_dialog),('Отчёт: отсутствующие переводы',self.translation_report),
                                    ('Отчёт: отсутствующие иконки',self.icon_report),
                                    ('Экспорт инвентаря в CSV',self.export_csv)]),
@@ -478,7 +509,7 @@ class MainWindow(QMainWindow):
         self.tools_title=glass_label('ИНСТРУМЕНТЫ И ДИАГНОСТИКА','section',14)
         grid.addWidget(self.tools_title,0,0,1,2)
         self.tool_groups=[]
-        self.tool_btns=[]
+        self.tool_btns={}
         for i,(name,items) in enumerate(specs):
             pane=GlassPanel();pl=QVBoxLayout(pane);pl.setContentsMargins(15,12,15,14)
             lbl=glass_label(name,'section',12);pl.addWidget(lbl)
@@ -486,7 +517,7 @@ class MainWindow(QMainWindow):
                 b=add_button(title,fn)
                 b.setMinimumHeight(40);b.setMaximumHeight(42)
                 pl.addWidget(b)
-                self.tool_btns.append((title,b))
+                self.tool_btns[title]=b
             pl.addStretch();grid.addWidget(pane,1+i//2,i%2)
             self.tool_groups.append((lbl,items))
         self.scan_state=glass_label('Сканирование ещё не выполнялось','muted',11)
@@ -515,9 +546,8 @@ class MainWindow(QMainWindow):
         self.item_category=ElideLabel();self.item_category.setObjectName('itemCategoryBadge')
         self.item_category.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Fixed)
         self.item_category.setFixedHeight(19);identity.addWidget(self.item_category)
-        self.owned_note=glass_label('','muted',10);self.owned_note.hide()
         labels=QHBoxLayout();labels.setSpacing(8)
-        self.id_caption=glass_label('ID предмета','muted',10);self.qty_caption=glass_label('Количество (0–99)','muted',10)
+        self.id_caption=glass_label('ID предмета','muted',10);self.qty_caption=ElideLabel();self.qty_caption.setProperty('role','muted')
         self.id_caption.setObjectName('fieldCaption');self.qty_caption.setObjectName('fieldCaption')
         self.id_caption.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Preferred)
         self.qty_caption.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Preferred)
@@ -530,7 +560,7 @@ class MainWindow(QMainWindow):
             field.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Fixed)
         self.qty.valueChanged.connect(self._quantity_edited)
         nums.addWidget(self.id_field,1);nums.addWidget(self.qty,1);identity.addLayout(nums);top.addLayout(identity,1);l.addLayout(top)
-        self.quantity_note=glass_label('','muted',10);self.quantity_note.setObjectName('quantityChange')
+        self.quantity_note=ElideLabel();self.quantity_note.setObjectName('quantityChange')
         self.quantity_note.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Fixed)
         self.quantity_note.setFixedHeight(21);l.addWidget(self.quantity_note)
         self.quantity_presets=QHBoxLayout();self.preset_buttons={}
@@ -540,7 +570,8 @@ class MainWindow(QMainWindow):
         def quick_menu(pos):
             menu=QMenu(self.qty)
             for amount in (1,10,50,99):
-                a=menu.addAction(str(amount));a.triggered.connect(lambda checked=False,v=amount:self.qty.setValue(v))
+                a=menu.addAction(str(amount));a.setEnabled(amount<=self.qty.maximum())
+                a.triggered.connect(lambda checked=False,v=amount:self.qty.setValue(v))
             try:menu.exec(self.qty.mapToGlobal(pos))
             finally:menu.deleteLater()
         self.qty.customContextMenuRequested.connect(quick_menu)
@@ -568,11 +599,11 @@ class MainWindow(QMainWindow):
         if v:
             with QSignalBlocker(self.present):self.present.setChecked(False)
             self.owned_action.setChecked(False)
-        self.update_tables()
+        self.update_tables('catalog')
     def _only_present(self,v):
         if v:
             with QSignalBlocker(self.missing):self.missing.setChecked(False)
-        self.update_tables()
+        self.update_tables('catalog')
 
     def initial_load(self):
         if not self.core.catalog:
@@ -606,16 +637,19 @@ class MainWindow(QMainWindow):
         showing=section!='tools' and not self._startup_dismissed and (needed or self._startup_forced)
         source = self.core.source
         save_name = source.name if source else self.msg('Учебный инвентарь','Sample inventory') if self.core.save else ''
-        self.startup_page.render_state(language=self.language,catalog_count=count, demo=self.core.storage is None,
-            save_name=save_name,busy=self._scan_busy,
-            stage=self._scan_stage,error=self._scan_error,error_details=error_text(self._scan_error_details,self.language),
-            warning_count=self._scan_warning_count)
+        state=dict(language=self.language,catalog_count=count,demo=self.core.storage is None,
+                   save_name=save_name,busy=self._scan_busy,stage=self._scan_stage,error=self._scan_error,
+                   error_details=self.msg(*self._scan_error_details),
+                   warning_count=self._scan_warning_count)
+        if state!=self._startup_state:
+            self.startup_page.render_state(**state)
+            self._startup_state=state
+        self.startup_page.open_button.setEnabled(bool(count) and not self._scan_busy and self._file_job is None)
         self.pages.setCurrentWidget(self.startup_page if showing else {'catalog':self.catpage,'inventory':self.invpage,'tools':self.toolspage}[section])
         self.tabs.setVisible(section!='tools' and not showing)
         self.detail_shell.setVisible(section!='tools' and not showing)
         self.detail.setVisible(section!='tools' and not showing)
-        if showing:
-            self.footer.setText(self.msg('Начало работы', 'Getting started'))
+        self._refresh_view_footer()
 
     def show_section(self,section):
         self.current_section=section
@@ -627,25 +661,28 @@ class MainWindow(QMainWindow):
         self.tabcat.setVisible(section!='tools');self.tabinv.setVisible(section!='tools')
         self.tabcat.setChecked(section=='catalog');self.tabinv.setChecked(section=='inventory')
         for k,b in self.navigation.items():b.setChecked(k==section)
-        self.update_tables()
-        if section in ('catalog','inventory'):
-            selected=self.selected_ids(self.cat_table if section=='catalog' else self.inv_table)
-            if selected and self.active_item_id not in selected:self.show_item(selected[-1])
+        self._sync_selection(self.cat_table if section=='catalog' else self.inv_table)
+        self.refresh_save_labels()
+
+    def _apply_qt_language(self):
+        app=QApplication.instance()
+        app.removeTranslator(self._qt_translation)
+        if self.language=='ru' and self._qt_translation.load(
+                'qtbase_ru',QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
+            app.installTranslator(self._qt_translation)
 
     def switch_language(self):
-        # UI translation must not discard a quantity typed but not yet applied.
-        pending_quantity = self.qty.value()
-        quantity_edited = self._quantity_user_edited
         self.language='en' if self.lang.currentIndex()==1 else 'ru'
         self.core.set_language(self.language)
-        self.retranslate();self.populate_categories();self.update_tables()
-        self.show_item(self.active_item_id)
-        if self.active_item_id is not None:
-            self.qty.setValue(pending_quantity)
-            self._quantity_user_edited=quantity_edited
+        self._apply_qt_language()
+        self.retranslate()
+        self.refresh_catalog()
 
     def retranslate(self):
         t=self.msg
+        self.crest.setAccessibleName(t('Военная академия Торс','Thors Military Academy'))
+        if hasattr(self,'resize_grip'):
+            self.resize_grip.setToolTip(t('Потяните, чтобы изменить размер окна','Drag to resize the window'))
         self.title.setText(t('Редактор сохранений','Save editor'))
         self.subtitle.setText(t('COLD STEEL I · АКАДЕМИЯ ТОРС · КЛАСС VII','COLD STEEL I · THORS ACADEMY · CLASS VII'))
         for key,ru,en in [('inventory','Инвентарь','Inventory'),
@@ -665,29 +702,29 @@ class MainWindow(QMainWindow):
         self.present.setText(t('Только имеющиеся','Owned only'))
         self.filter_button.setText(t('Фильтры ▾','Filters ▾'))
         self.owned_action.setText(t('Только имеющиеся','Owned only'))
-        for action,ru,en in zip(self.source_actions,['Все источники','Основная игра','DLC'],['All sources','Base game','DLC']):action.setText(t(ru,en))
+        sources=(t('Все источники','All sources'),t('Основная игра','Base game'),t('Дополнения','DLC'))
+        for action,text in zip(self.source_actions,sources):action.setText(text)
         for symbol,ru,en in [('minimize','Свернуть','Minimize'),('maximize','Развернуть / восстановить','Maximize / restore'),('close','Закрыть','Close')]:
             self.window_buttons[symbol].setToolTip(t(ru,en))
         self.help_button.setToolTip(t('Справка','Help'))
         selected_source=self.source.currentIndex()
-        self.source.blockSignals(True);self.source.clear();self.source.addItems([
-            t('Все источники','All sources'),t('Основная игра','Base game'),'DLC'])
+        self.source.blockSignals(True);self.source.clear();self.source.addItems(sources)
         self.source.setCurrentIndex(max(0,selected_source));self.source.blockSignals(False)
-        self.cat_table.setHorizontalHeaderLabels([t('Предмет','Item'),'ID',t('Категория','Category'),t('В инвентаре','Owned')])
-        self.inv_table.setHorizontalHeaderLabels([t('Предмет','Item'),'ID',t('Категория','Category'),t('В инвентаре','Owned')])
-        self.add_one.setText(t('По 1 каждому','Set 1 each'))
-        self.add_bulk.setText(t('Добавить выбранные','Apply to selected'))
+        headers=(t('Предмет','Item'),'ID',t('Категория','Category'),t('В инвентаре','Owned'))
+        for table in (self.cat_table,self.inv_table):
+            table.model().set_headers(headers)
+        self.add_one.setText(t('Установить по 1','Set 1 each'))
+        self.add_bulk.setText(t('Задать количество','Apply to selected'))
         self.del_bulk.setText(t('Удалить выбранные','Remove selected'))
         self.detail_title.setText(t('ВЫБРАННЫЙ ПРЕДМЕТ','SELECTED ITEM'))
         self.id_caption.setText(t('ID предмета','Item ID'))
-        self.qty_caption.setText(t('Количество (0–99)','Quantity (0–99)'))
         self.apply_btn.setText(t('Применить количество','Apply quantity'))
         self.delete_btn.setText(t('Удалить предмет из сохранения','Delete from save'))
         self.undo_btn.setText(t('Отменить','Undo'))
         self.reset_btn.setText(t('Сбросить правки','Reset edits'))
         self.favorite_btn.setText('☆')
-        self.favorite_btn.setToolTip(t('Добавить или убрать из избранного','Add or remove favorite'))
-        self.description_title.setText(t('Описание и характеристики','Description & details'))
+        self.favorite_btn.setToolTip(t('Добавить в избранное или удалить из него','Add to or remove from favorites'))
+        self.description_title.setText(t('Описание и характеристики','Description & stats'))
         self.qty_preset_caption.setText(t('БЫСТРОЕ КОЛИЧЕСТВО','QUICK QUANTITY'))
         self.safe_note.setText(t('При перезаписи слота редактор создаёт резервную копию.',
                                  'Overwriting a slot creates a backup.') if self.core.storage else
@@ -703,9 +740,9 @@ class MainWindow(QMainWindow):
         else:
             self.scan_state.setText(t('Сканирование ещё не выполнялось','Game has not been scanned yet'))
         for label,(ru,en) in zip([x[0] for x in self.tool_groups],[
-             ('Сохранения','Saves'),('Игра и DLC','Game & DLC'),('Каталог и диагностика','Catalog & diagnostics'),('Настройки','Settings')]):
+             ('Сохранения','Saves'),('Игра и дополнения','Game & DLC'),('Каталог и диагностика','Catalog & diagnostics'),('Настройки','Settings')]):
              label.setText(t(ru,en))
-        for ru,btn in self.tool_btns:
+        for ru,btn in self.tool_btns.items():
             btn.setText(t(ru, TOOL_EN.get(ru,ru)))
         self._refresh_section_headers()
         if getattr(self,'_notice_text',None):self.notice.setText(self.msg(*self._notice_text))
@@ -743,7 +780,6 @@ class MainWindow(QMainWindow):
         for i,value in enumerate((62,109,82) if compact else (70,133,108),start=1):self.inv_table.setColumnWidth(i,value)
         for table in (self.cat_table,self.inv_table):table.verticalHeader().setDefaultSectionSize(30)
         self.footer_row.layout().setContentsMargins(rail+8,2,4,0)
-        self.qty_caption.setToolTip(self.msg('Допустимое количество: от 0 до 99','Allowed quantity: 0 to 99'))
         self.btn_latest.setToolTip(self.msg('Открыть последнее сохранение (F5)','Open latest save (F5)') if self.core.storage else
                                    self.msg('Загрузить учебный инвентарь (F5)','Load sample inventory (F5)'))
         self.btn_open.setToolTip(self.msg('Открыть сохранение (Ctrl+O)','Open save (Ctrl+O)'))
@@ -758,18 +794,16 @@ class MainWindow(QMainWindow):
         for field,text,padding in ((self.id_field,'65535',18),(self.qty,'99',36)):
             field.ensurePolished()
             field.setMinimumWidth(field.fontMetrics().horizontalAdvance(text)+padding)
-        for caption,full,brief in (
-                (self.id_caption,self.msg('ID предмета','Item ID'),'ID'),
-                (self.qty_caption,self.msg('Количество (0–99)','Quantity (0–99)'),self.msg('Кол-во','Qty'))):
-            caption.ensurePolished()
-            caption.setText(brief if compact or caption.fontMetrics().horizontalAdvance(full)>field_width else full)
+        id_caption=self.msg('ID предмета','Item ID')
+        self.id_caption.ensurePolished()
+        self.id_caption.setText('ID' if compact or self.id_caption.fontMetrics().horizontalAdvance(id_caption)>field_width else id_caption)
+        self._refresh_quantity_caption()
         for button in (self.apply_btn,self.delete_btn,self.undo_btn,self.reset_btn):
             button.setFixedHeight(40 if self.height()<800 else 48)
         self.reset_btn.setText(self.msg('Сбросить','Reset') if compact else self.msg('Сбросить правки','Reset edits'))
         self.delete_btn.setText(self.msg('Удалить из сохранения','Delete from save') if compact else self.msg('Удалить предмет из сохранения','Delete from save'))
         if self.active_item_id is not None:
-            ico=self._icon(self.active_item_id,self.core.catalog.get(self.active_item_id,{}))
-            self._set_big_icon(ico,72 if compact else 90)
+            self._set_big_icon(self.active_item_id,72 if compact else 90)
 
     def _refresh_section_headers(self):
         self.rail_header.setCaption(self.msg('НАВИГАЦИЯ','NAVIGATION'))
@@ -785,7 +819,7 @@ class MainWindow(QMainWindow):
     def populate_categories(self):
         visible=self._catalog_view()
         counts=Counter(category_of(record) for record in visible.values())
-        quantities={entry.item_id:entry.quantity for entry in self.core.save.items()} if self.core.save else {}
+        quantities=self.core.save.quantities if self.core.save else {}
         owned={i:self.core.catalog.get(i,{'id':i,'category':'other'}) for i in quantities}
         owned_counts=Counter(category_of(record) for record in owned.values())
         def entry(tree,kind,key,title,count,parent=None):
@@ -820,16 +854,23 @@ class MainWindow(QMainWindow):
                 try:
                     entry(tree,kind,'all',self.msg('Все предметы','All items'),total)
                     for group,(ru,subs) in GROUPS.items():
-                        parent=entry(tree,kind,group,ru if self.language=='ru' else GROUP_EN.get(group,ru),sum(totals[k] for k,_ in subs))
+                        new_group=group not in self._category_nodes[kind]
+                        count=sum(totals[k] for k,_ in subs)
+                        parent=entry(tree,kind,group,ru if self.language=='ru' else GROUP_EN.get(group,ru),count)
+                        parent.setHidden(kind=='catalog' and not count)
                         for key,label in subs:
-                            entry(tree,kind,key,label if self.language=='ru' else CATEGORY_EN.get(key,key.title()),totals[key],parent)
-                        parent.setExpanded(True)
+                            child=entry(tree,kind,key,label if self.language=='ru' else CATEGORY_EN.get(key,key.title()),totals[key],parent)
+                            child.setHidden(kind=='catalog' and not totals[key])
+                        if new_group:parent.setExpanded(True)
                     if kind=='catalog':
                         entry(tree,kind,'favorites',self.msg('Избранное','Favorites'),len(self.core.favorites & visible.keys()))
                         entry(tree,kind,'recent',self.msg('Недавно добавленные','Recently added'),sum(i in visible for i in self.core.recent))
                     selection=self._category_nodes[kind].get(previous)
-                    if selection:tree.setCurrentItem(selection)
-                    if favorites:tree.clearSelection()
+                    if kind=='catalog' and (selection is None or selection.isHidden()):
+                        self.filter_group='all'
+                        selection=self._category_nodes[kind]['all']
+                    if not favorites and selection and not selection.isSelected():
+                        tree.setCurrentItem(selection)
                 finally:tree.setUpdatesEnabled(updates_enabled)
 
     def on_category(self,tree=None,kind='catalog'):
@@ -840,30 +881,76 @@ class MainWindow(QMainWindow):
                 self.filter_group=value;self.cat_favorites_only=False;self.cat_quick_favorite.setChecked(False)
             else:
                 self.inv_filter_group=value;self.inv_favorites_only=False;self.inv_quick_favorite.setChecked(False)
-            self.update_tables()
+            self.update_tables(kind)
 
     def sort_rows(self,kind,column):
         previous_column,descending=self.sort_keys[kind]
         self.sort_keys[kind]=(column,not descending if column==previous_column else False)
-        self.update_tables()
+        if self.search_debounce[kind].isActive():
+            self.update_tables(kind)
+        else:
+            table=self.cat_table if kind=='catalog' else self.inv_table
+            self._present_rows(kind,table,list(table.model().rows))
 
-    def _icon(self,item_id,record):
+    def _icon(self,item_id):
         if item_id in self._icon_pixmaps:return self._icon_pixmaps[item_id]
         item = self.core.native.get(item_id)
-        icon = self.art.item_icon(item_id, item) if item is not None else QIcon()
+        if isinstance(item_id,str):
+            icon=self.art.tile_icon(self.art.reference_tile(item_id))
+        else:
+            icon=self.art.item_icon(item_id,item) if item is not None else QIcon()
         self._icon_pixmaps[item_id] = icon
         return icon
 
-    def _set_big_icon(self,icon,side):
-        dpr=max(2.0,self.devicePixelRatioF())
-        px=icon.pixmap(QSize(side,side),dpr)
-        if px.isNull():
-            self.big_icon.clear();self.big_icon.setText(self.msg('Нет иконки','No icon'))
+    def _set_big_icon(self,item_id,side):
+        item=self.core.native.get(item_id)
+        if item is not None:
+            picture=self.art.item_picture(item_id,item)
+        elif isinstance(item_id,str) and item_id.startswith('fish:'):
+            picture=self.art.fish_picture(int(item_id.removeprefix('fish:')))
+        elif isinstance(item_id,str) and item_id.startswith('dlc:'):
+            picture=self.art.tile(self.art.reference_tile(item_id))
         else:
-            if max(px.width(),px.height())<round(side*dpr):
-                px=px.scaled(round(side*dpr),round(side*dpr),Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation)
-                px.setDevicePixelRatio(dpr)
-            self.big_icon.setPixmap(px)
+            picture=QPixmap()
+        if picture.isNull():
+            self.big_icon.setText(self.msg('Нет иконки','No icon'))
+            return
+        dpr=self.devicePixelRatioF()
+        pixels=round(side*dpr)
+        key=f'cs1-item-{picture.cacheKey()}-{pixels}-{dpr}'
+        px=QPixmapCache.find(key)
+        if px is None:
+            native=max(picture.width(),picture.height())
+            # Whole-pixel enlargement keeps the original inventory sprites sharp.
+            if native<=pixels:
+                factor=pixels//native
+                px=picture.scaled(picture.size()*factor,Qt.AspectRatioMode.KeepAspectRatio,
+                                  Qt.TransformationMode.FastTransformation) if factor>1 else QPixmap(picture)
+            else:
+                px=picture.scaled(pixels,pixels,Qt.AspectRatioMode.KeepAspectRatio,
+                                  Qt.TransformationMode.SmoothTransformation)
+            px.setDevicePixelRatio(dpr)
+            QPixmapCache.insert(key,px)
+        self.big_icon.setPixmap(px)
+
+    def event(self,event):
+        result=super().event(event)
+        if event.type()==QEvent.Type.DevicePixelRatioChange and hasattr(self,'logo_art'):
+            self._refresh_branding_art()
+            if self.active_item_id is not None:
+                self._set_big_icon(self.active_item_id,72 if self.width()<1460 else 90)
+        return result
+
+    def _refresh_branding_art(self):
+        dpr=self.devicePixelRatioF()
+        for art,label,size in ((self.emblem_art,self.crest,QSize(74,74)),
+                               (self.logo_art,getattr(self,'logo',None),QSize(151,62))):
+            if art.isNull():
+                continue
+            pixmap=art.scaled(size*dpr,Qt.AspectRatioMode.KeepAspectRatio,
+                              Qt.TransformationMode.SmoothTransformation)
+            pixmap.setDevicePixelRatio(dpr)
+            label.setPixmap(pixmap)
 
     def toggle_quick_favorites(self,kind):
         if kind=='catalog':
@@ -871,12 +958,15 @@ class MainWindow(QMainWindow):
         else:
             self.inv_favorites_only=self.inv_quick_favorite.isChecked();tree=self.inv_tree
         active=self.cat_favorites_only if kind=='catalog' else self.inv_favorites_only
-        tree.blockSignals(True)
-        if active:tree.clearSelection()
-        elif tree.currentItem():tree.setCurrentItem(tree.currentItem())
-        tree.blockSignals(False);self.update_tables()
+        with QSignalBlocker(tree):
+            if active:
+                tree.setCurrentItem(None)
+            else:
+                group=self.filter_group if kind=='catalog' else self.inv_filter_group
+                tree.setCurrentItem(self._category_nodes[kind][group])
+        self.update_tables(kind)
         if active and not self.core.favorites:
-            self.show_toast('В избранном пока пусто. Добавь предмет звездочкой в карточке.',
+            self.show_toast('В избранном пока пусто. Нажмите на звёздочку в карточке предмета.',
                             'No favorites yet. Use the star on an item card to add one.')
 
     def _catalog_view(self):
@@ -885,16 +975,26 @@ class MainWindow(QMainWindow):
             self._visible_catalog=self.core.visible()
             self._search_details.clear()
             self._row_names.clear()
+            self._search_names.clear()
+            self._item_rows.clear()
             self._icon_pixmaps.clear()
-            self._category_icons.clear();self._table_rows.clear()
+            self._category_icons.clear()
         if self._view_english is not self.core.english or self._view_language!=self.language:
             self._view_english=self.core.english;self._view_language=self.language
             self._search_details.clear()
             self._row_names.clear()
+            self._search_names.clear()
+            self._item_rows.clear()
         return self._visible_catalog
 
-    def _matches_search(self,needle,iid,name):
-        if not needle or needle in str(iid) or needle in name.casefold():return True
+    def _name_folded(self,iid):
+        if iid not in self._search_names:
+            self._search_names[iid]=self._row_name(iid).casefold()
+        return self._search_names[iid]
+
+    def _matches_search(self,needle,iid):
+        if not needle or (isinstance(iid,int) and needle in str(iid)) or needle in self._name_folded(iid):
+            return True
         if iid not in self._search_details:
             self._search_details[iid]=self.core.details_text(iid).casefold()
         return needle in self._search_details[iid]
@@ -903,168 +1003,229 @@ class MainWindow(QMainWindow):
         if iid not in self._row_names:self._row_names[iid]=self.core.item_name(iid)
         return self._row_names[iid]
 
-    def _rows_for(self,kind,entries=None):
+    def _rows_for(self,kind,quantities):
         visible=self._catalog_view()
-        if entries is None:entries=self.core.save.items() if self.core.save else []
         if kind=='inventory':
-            if not self.core.save:return []
             rows=[]
             needle=self.inv_search.text().casefold().strip()
-            for ent in entries:
-                record=self.core.catalog.get(ent.item_id)
-                if record is None:
-                    record={'id':ent.item_id,'name':f'ID {ent.item_id}','description':'','category':'other'}
+            for iid,quantity in quantities.items():
+                record=self.core.catalog.get(iid,{})
                 if self.inv_favorites_only:
-                    if ent.item_id not in self.core.favorites:continue
+                    if iid not in self.core.favorites:continue
                 elif not item_in_category(record,self.inv_filter_group):continue
-                name=self._row_name(ent.item_id)
-                if not self._matches_search(needle,ent.item_id,name):continue
-                rows.append((ent.item_id,name,ent.slot+1,ent.quantity,record))
+                if self._matches_search(needle,iid):
+                    rows.append(self._item_row(iid,record,quantity))
             return rows
         rows=[]
         needle=self.cat_search.text().strip().casefold()
-        quantities={entry.item_id:entry.quantity for entry in entries}
         source_filter=self.source.currentIndex()
         missing=self.missing.isChecked();present=self.present.isChecked()
-        for i,record in visible.items():
-            if self.cat_favorites_only:
-                if i not in self.core.favorites:continue
-            elif self.filter_group=='favorites' and i not in self.core.favorites:continue
-            elif self.filter_group=='recent' and i not in self.core.recent:continue
-            elif not self.cat_favorites_only and self.filter_group not in ('favorites','recent') and not item_in_category(record,self.filter_group):continue
-            qty=quantities.get(i,0)
-            if missing and qty:continue
-            if present and not qty:continue
-            source=record.get('_source','base')
-            if source_filter==1 and source=='dlc':continue
-            if source_filter==2 and source!='dlc':continue
-            name=self._row_name(i)
-            if not self._matches_search(needle,i,name):continue
-            rows.append((i,name,category_of(record),qty,record))
+        group='favorites' if self.cat_favorites_only else self.filter_group
+        recent=set(self.core.recent) if group=='recent' else ()
+        for iid,record in visible.items():
+            if group=='favorites':
+                if iid not in self.core.favorites:continue
+            elif group=='recent':
+                if iid not in recent:continue
+            elif group!='all' and not item_in_category(record,group):continue
+            qty=quantities.get(iid,0) if record['track_quantity'] else None
+            if qty is None and (missing or present):continue
+            if (missing and qty) or (present and not qty):continue
+            if source_filter==1 and record['_source']=='dlc':continue
+            if source_filter==2 and record['_source']=='base':continue
+            if self._matches_search(needle,iid):
+                rows.append(self._item_row(iid,record,qty))
         return rows
 
-    def update_tables(self):
+    def _item_row(self, item_id, record, quantity):
+        change=self.edit_changes.changes.get(item_id)
+        row=self._item_rows.get(item_id)
+        if row is None or row.quantity!=quantity or row.change!=change:
+            row=ItemRow(item_id,self._row_name(item_id),self.category_label(category_of(record)),quantity,change)
+            if record:
+                self._item_rows[item_id]=row
+        return row
+
+    def update_tables(self, only=None):
         self.edit_changes.refresh(self.core.save)
-        entries=self.core.save.items() if self.core.save else []
-        for kind,table in [('catalog',self.cat_table),('inventory',self.inv_table)]:
-            rows=self._rows_for(kind,entries)
-            col,rev=self.sort_keys[kind]
-            def sortrow(r):
-                if col==0:return r[1].casefold()
-                if col==1:return r[0]
-                if col==2:return self.category_label(category_of(r[4])).casefold()
-                return r[3]
-            rows.sort(key=sortrow,reverse=rev)
-            table.horizontalHeader().setSortIndicator(col,Qt.SortOrder.DescendingOrder if rev else Qt.SortOrder.AscendingOrder)
-            signatures=[]
-            for iid,name,sub,qty,rec in rows:
-                change=self.edit_changes.changes.get(iid)
-                signatures.append((iid,name,self.category_label(category_of(rec)),qty,
-                                   (change.before,change.after) if change else None,self.language))
-            old=self._table_rows.get(kind,[])
-            if signatures!=old or table.rowCount()!=len(rows):
-                self._table_rows.pop(kind,None)
-                previous=set(self.selected_ids(table))
-                current=table.currentItem()
-                current_id=table.item(current.row(),0).data(Qt.ItemDataRole.UserRole) if current else None
-                reordered=([r[0] for r in old]!=[r[0] for r in signatures])
-                updates_enabled=table.updatesEnabled()
-                with QSignalBlocker(table):
-                    table.setUpdatesEnabled(False)
-                    try:
-                        if reordered:table.clearSelection();table.setCurrentItem(None)
-                        table.setRowCount(len(rows))
-                        for ix,(row,signature) in enumerate(zip(rows,signatures)):
-                            if ix<len(old) and signature==old[ix]:continue
-                            iid,name,category,qty,change,language=signature
-                            tip=name
-                            if change:tip+=self.msg(f'\nИзменено: {change[0]} → {change[1]}',f'\nChanged: {change[0]} → {change[1]}')
-                            for column,text in enumerate((name,str(iid),category,str(qty))):
-                                cell=table.item(ix,column)
-                                if cell is None:
-                                    cell=QTableWidgetItem();table.setItem(ix,column,cell)
-                                    if column:cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                                cell.setText(text)
-                                cell.setToolTip(tip if column==0 or (column==3 and change) else text)
-                                cell.setData(Qt.ItemDataRole.UserRole+1,change)
-                                if column==0:
-                                    cell.setData(Qt.ItemDataRole.UserRole,iid)
-                                    cell.setIcon(self._icon(iid,row[4]))
-                        if reordered:
-                            from PySide6.QtCore import QItemSelectionModel
-                            sel=table.selectionModel()
-                            for ix,signature in enumerate(signatures):
-                                iid=signature[0]
-                                if iid in previous:
-                                    sel.select(table.model().index(ix,0),QItemSelectionModel.SelectionFlag.Select|QItemSelectionModel.SelectionFlag.Rows)
-                                if iid==current_id:
-                                    sel.setCurrentIndex(table.model().index(ix,0),QItemSelectionModel.SelectionFlag.NoUpdate)
-                        self._table_rows[kind]=signatures
-                    finally:table.setUpdatesEnabled(updates_enabled)
+        quantities=self.core.save.quantities if self.core.save else {}
+        for kind,table in (('catalog',self.cat_table),('inventory',self.inv_table)):
+            if only and kind!=only:
+                continue
+            self.search_debounce[kind].stop()
+            rows=self._rows_for(kind,quantities)
+            self._present_rows(kind,table,rows)
             if kind=='catalog':
                 self.catalog_counter.setText(self.msg(f'НАЙДЕНО ПРЕДМЕТОВ: {len(rows)}',f'ITEMS FOUND: {len(rows)}'))
-        self.selection_info.setText(self.msg('Выделено: ','Selected: ')+str(len(self.cat_table.selectionModel().selectedRows())))
-        self.bulk_bar.setVisible(len(self.cat_table.selectionModel().selectedRows())>1)
-        self.inv_selection_info.setText(self.msg('Выделено: ','Selected: ')+str(len(self.selected_ids(self.inv_table))))
-        self.inv_bulk_bar.setVisible(len(self.selected_ids(self.inv_table))>1)
-        section = getattr(self, 'current_section', 'catalog')
-        if self.active_item_id is not None and section in ('catalog', 'inventory'):
-            active = self.cat_table if section == 'catalog' else self.inv_table
-            selected = self.selected_ids(active)
-            if self.active_item_id not in selected:
-                self.show_item(selected[-1] if selected else None)
-        self.refresh_save_labels()
+                self._show_catalog_empty(not rows)
+        if only:
+            self._refresh_view_footer()
+        else:
+            self.refresh_save_labels()
+
+    def _present_rows(self,kind,table,rows):
+        col,reverse=self.sort_keys[kind]
+        keys=(lambda row:self._name_folded(row.item_id),lambda row:row.item_id if isinstance(row.item_id,int) else 0,
+              lambda row:row.category.casefold(),lambda row:row.quantity if row.quantity is not None else 0)
+        rows.sort(key=keys[col],reverse=reverse)
+        if col==1:
+            rows.sort(key=lambda row:isinstance(row.item_id,str))
+        elif col==3:
+            rows.sort(key=lambda row:row.quantity is None)
+        header=table.horizontalHeader()
+        order=Qt.SortOrder.DescendingOrder if reverse else Qt.SortOrder.AscendingOrder
+        if header.sortIndicatorSection()!=col or header.sortIndicatorOrder()!=order:
+            header.setSortIndicator(col,order)
+        self._set_table_rows(table,rows)
+        self.selection_changed(table)
+
+    def _show_catalog_empty(self,empty):
+        self.catalog_empty.setVisible(empty)
+        if not empty:return
+        if not self.core.catalog:
+            text=self.msg('Загрузите каталог из папки игры.','Load the catalog from the game folder.')
+        elif self.cat_favorites_only or self.filter_group=='favorites':
+            text=self.msg('В избранном пока нет предметов по текущим фильтрам.',
+                          'No favorites match the current filters.')
+        elif self.filter_group=='recent' and not self.core.recent:
+            text=self.msg('Недавно добавленных предметов пока нет.','No recently added items yet.')
+        else:
+            text=self.msg('Предметы не найдены. Проверьте поиск и фильтры.',
+                          'No items found. Check the search and filters.')
+        self.catalog_empty.setText(text)
+
+    def _set_table_rows(self, table, rows):
+        model=table.model()
+        selection=table.selectionModel()
+        selected=self.selected_ids(table)
+        old_current=table.currentIndex()
+        current=old_current.data(Qt.ItemDataRole.UserRole)
+        current_column=max(0,old_current.column())
+        top=model.index(table.rowAt(0),0).data(Qt.ItemDataRole.UserRole)
+        with QSignalBlocker(selection):
+            if not model.replace_rows(rows):
+                return
+            restored=QItemSelection()
+            positions=sorted(model.positions[item_id] for item_id in selected if item_id in model.positions)
+            for _,run in groupby(enumerate(positions),key=lambda entry:entry[1]-entry[0]):
+                first=last=next(run)[1]
+                for _,last in run:
+                    pass
+                restored.select(model.index(first,0),model.index(last,0))
+            selection.select(restored,QItemSelectionModel.SelectionFlag.Select|QItemSelectionModel.SelectionFlag.Rows)
+            current_index=model.index_for_id(current)
+            selection.setCurrentIndex(current_index.siblingAtColumn(current_column),QItemSelectionModel.SelectionFlag.NoUpdate)
+        top_index=model.index_for_id(top)
+        if top_index.isValid():
+            table.scrollTo(top_index,QAbstractItemView.ScrollHint.PositionAtTop)
+        elif current_index.isValid() and current in selected:
+            table.scrollTo(current_index)
+        else:
+            table.scrollToTop()
 
     def category_label(self,key):
         if self.language=='ru':return CATEGORY_NAMES.get(key,key)
         return CATEGORY_EN.get(key,key.title())
 
     def selected_ids(self,table):
-        ids=[]
-        for idx in table.selectionModel().selectedRows():
-            item=table.item(idx.row(),0)
-            if item:ids.append(int(item.data(Qt.ItemDataRole.UserRole)))
-        return list(dict.fromkeys(ids))
+        return [index.data(Qt.ItemDataRole.UserRole) for index in table.selectionModel().selectedRows()]
+
+    def _sync_selection(self,table,ids=None):
+        section=getattr(self,'current_section','catalog')
+        if section=='tools' or table is not (self.cat_table if section=='catalog' else self.inv_table):
+            return
+        if ids is None:
+            ids=self.selected_ids(table)
+        current=table.currentIndex().data(Qt.ItemDataRole.UserRole)
+        item_id=current if current in ids else self.active_item_id if self.active_item_id in ids else (ids[-1] if ids else None)
+        if self.active_item_id!=item_id:
+            self.show_item(item_id)
 
     def selection_changed(self,table):
         ids=self.selected_ids(table)
-        active_table=self.cat_table if getattr(self,'current_section','catalog')=='catalog' else self.inv_table
-        if table is active_table:self.show_item(ids[-1] if ids else None)
-        self.selection_info.setText(self.msg('Выделено: ','Selected: ')+str(len(self.selected_ids(self.cat_table))))
-        self.bulk_bar.setVisible(len(self.selected_ids(self.cat_table))>1)
-        self.inv_bulk_bar.setVisible(len(self.selected_ids(self.inv_table))>1)
-        self.inv_selection_info.setText(self.msg('Выделено: ','Selected: ')+str(len(self.selected_ids(self.inv_table))))
+        self._sync_selection(table,ids)
+        bar,label=(self.bulk_bar,self.selection_info) if table is self.cat_table else (self.inv_bulk_bar,self.inv_selection_info)
+        label.setText(self.msg('Выделено: ','Selected: ')+str(len(ids)))
+        bar.setVisible(len(ids)>1)
+        self._refresh_bulk_controls(table,ids)
+
+    def _refresh_quantity_caption(self):
+        item=self.core.native.get(self.active_item_id)
+        tracked=self.core.catalog.get(self.active_item_id,{}).get('track_quantity',True)
+        limit=item.limit if tracked and item and 1<=item.limit<=99 else None
+        if limit is None:
+            self.qty_caption.setText(self.msg('Количество','Quantity'))
+            self.qty_caption.setToolTip('')
+            self.qty.setAccessibleName(self.qty_caption.text())
+        else:
+            self.qty_caption.setText(self.msg(f'Макс. {limit}',f'Max {limit}'))
+            tip=self.msg(f'Допустимое количество: 0–{limit}',f'Allowed quantity: 0–{limit}')
+            self.qty_caption.setToolTip(tip)
+            self.qty.setAccessibleName(tip)
+
+    def _set_description(self,text):
+        if self.description.toPlainText()!=text:
+            self.description.setPlainText(text)
 
     def show_item(self,iid):
         self.active_item_id=iid
         self._quantity_user_edited=False
-        self.apply_btn.setEnabled(self.core.can_edit(iid))
-        self.qty.setEnabled(self.core.can_edit(iid))
-        self.delete_btn.setEnabled(self.core.can_delete(iid))
+        editable=self.core.can_edit(iid)
+        self.favorite_btn.setEnabled(isinstance(iid,int))
+        self._refresh_quantity_caption()
         if iid is None:
             with QSignalBlocker(self.qty):
+                self.qty.setSpecialValueText('')
                 self.qty.setMaximum(99)
-                self.qty.setValue(1)
+                self.qty.setValue(0)
             self.item_name.setText(self.msg('Выберите предмет','Select an item'))
-            self.item_category.setText('');self.owned_note.setText('');self.id_field.clear()
-            self.description.clear();self.big_icon.clear();self.big_icon.setText('');self.favorite_btn.setText('☆');self.quantity_note.clear();return
+            self.item_category.setText('');self.id_field.clear()
+            self._set_description(self.msg('Выберите предмет, чтобы увидеть его описание.',
+                                           'Select an item to see its description.'))
+            self.big_icon.clear();self.big_icon.setToolTip('');self.favorite_btn.setText('☆')
+            self.refresh_quantity_note()
+            return
         record=self.core.catalog.get(iid,{})
+        item=self.core.native.get(iid)
         self.item_name.setText(self.core.item_name(iid))
-        source=self.msg('DLC','DLC') if record.get('_source')=='dlc' else self.msg('Основная игра','Base game')
-        self.item_category.setText(self.category_label(category_of(record))+' · '+source)
-        self.item_category.setToolTip(self.category_label(category_of(record))+' · '+source)
-        self.id_field.setText(str(iid))
+        category=self.category_label(category_of(record))
+        if item is not None:
+            source={
+                'dlc':self.msg('Дополнение','DLC'),
+                'base':self.msg('Основная игра','Base game'),
+                'both':self.msg('Основная игра и дополнения','Base game & DLC'),
+            }[record['_source']]
+            category+=' · '+source
+        self.item_category.setText(category)
+        self.id_field.setText(str(iid) if isinstance(iid,int) else '—')
         owned=self.core.quantity(iid)
         change=self.edit_changes.changes.get(iid)
         with QSignalBlocker(self.qty):
-            self.qty.setMaximum(max(0, min(99, record.get('limit', 99))))
-            self.qty.setValue(0 if change and change.after == 0 else owned or 1)
-        self.owned_note.setText(self.msg(f'В сумке: {owned}',f'Owned: {owned}'))
-        self.description.setPlainText(self.core.details_text(iid))
+            tracked=record.get('track_quantity',True)
+            self.qty.setSpecialValueText('' if tracked else '—')
+            self.qty.setMaximum(item.limit if item and 1<=item.limit<=99 else max(owned,99))
+            self.qty.setValue((owned if owned or change or not editable else 1) if tracked else 0)
+        description=self.core.details_text(iid).strip()
+        if isinstance(iid,str):
+            description=' '.join(description.split())
+        if description in ('◆','◇','-','—'):
+            description=''
+        stats=''
+        if item is not None:
+            labels=STAT_NAMES_RU if self.language=='ru' else STAT_NAMES
+            stats=' · '.join(f'{label} {value:+d}{"%" if name in ("ACC","EVA") else ""}'
+                             for name,label,value in zip(STAT_NAMES,labels,item.stats) if value)
+        self._set_description('\n\n'.join(part for part in (description,stats) if part) or
+                              self.msg('Описание и характеристики отсутствуют.','No description or stats available.'))
         self.favorite_btn.setText('★' if iid in self.core.favorites else '☆')
-        ico=self._icon(iid,record);self._set_big_icon(ico,72 if self.width()<1460 else 90)
-        self.big_icon.setToolTip(self.msg('Оригинальная иконка Cold Steel I', 'Original Cold Steel I artwork')
-                                 if not ico.isNull() else self.msg('Оригинальная иконка недоступна', 'Original icon unavailable'))
+        self._set_big_icon(iid,72 if self.width()<1460 else 90)
+        if self.big_icon.pixmap().isNull():
+            icon_tip=self.msg('Оригинальная иконка недоступна', 'Original icon unavailable')
+        elif iid==SHINING_POM_BAIT_ID and not self.art.shining_pom.isNull():
+            icon_tip=self.msg('Сияющий пом из боевого блокнота', 'Shining Pom from the battle notebook')
+        else:
+            icon_tip=self.msg('Оригинальная иконка Cold Steel I', 'Original Cold Steel I icon')
+        self.big_icon.setToolTip(icon_tip)
         self.refresh_quantity_note()
 
     def _quantity_edited(self,_value):
@@ -1075,20 +1236,51 @@ class MainWindow(QMainWindow):
         return bool(self.core.save and self._quantity_user_edited and self.active_item_id is not None and self.qty.value()!=self.core.quantity(self.active_item_id))
 
     def refresh_quantity_note(self):
-        if not hasattr(self,'quantity_note'):return
         iid=self.active_item_id
-        if iid is None:self.quantity_note.clear();return
-        self.edit_changes.refresh(self.core.save)
-        current=self.core.quantity(iid);before=self.edit_changes.before.get(iid,0);pending=self.qty.value()
-        if self.core.is_equipped_master(iid):
-            text=self.msg('Мастер-кварц уже экипирован.','Master quartz is already equipped.')
-        elif pending!=current:
+        current=self.core.quantity(iid)
+        pending=self.qty.value()
+        editable=self._file_job is None and self.core.can_edit(iid)
+        self.qty.setEnabled(editable)
+        self.apply_btn.setEnabled(editable and pending!=current)
+        self.delete_btn.setEnabled(editable and current>0)
+        if self.bulk_bar.isVisible():
+            self._refresh_bulk_controls(self.cat_table,self.selected_ids(self.cat_table))
+        if iid is None:
+            self.quantity_note.setText('')
+            return
+        before=self.edit_changes.before.get(iid,0)
+        if isinstance(iid,str) and iid.startswith('dlc:'):
+            text=self.msg('Набор дополнения · справочно','DLC pack · reference only')
+        elif isinstance(iid,str):
+            text=self.msg('Запись журнала рыбалки · справочно','Fishing notebook entry · reference only')
+        elif iid in NOTEBOOK_IDS:
+            text=self.msg('Служебная вкладка блокнота · только просмотр',
+                          'Notebook tab · read-only')
+        elif not self.core.catalog.get(iid,{}).get('track_quantity',True):
+            text=self.msg('Сепит учитывается отдельно от предметов','Sepith is tracked separately from items')
+        elif self.core.is_equipped_master(iid):
+            text=self.msg(f'В инвентаре: {current} · мастер-кварц экипирован',
+                          f'Owned: {current} · Master quartz equipped')
+        elif (item:=self.core.native.get(iid)) and not item.editable:
+            text=self.msg(f'В инвентаре: {current} · только просмотр',f'Owned: {current} · read-only')
+        elif pending!=current and self._quantity_user_edited:
             text=self.msg(f'Сейчас: {current}  →  После применения: {pending}',f'Current: {current}  →  After applying: {pending}')
         elif before!=current:
-            text=self.msg(f'Исходное: {before}  →  После правки: {current}',f'Original: {before}  →  After editing: {current}')
-        else:text=self.msg(f'В инвентаре: {current}',f'Owned: {current}')
-        self.quantity_note.setText(text);self.quantity_note.setToolTip(text)
-        self.quantity_note.setProperty('changed',before!=current or pending!=current)
+            text=self.msg(f'Было: {before}  →  Сейчас: {current}',f'Original: {before}  →  Current: {current}')
+        else:
+            text=self.msg(f'В инвентаре: {current}',f'Owned: {current}')
+        self.quantity_note.setText(text)
+
+    def _refresh_bulk_controls(self,table,ids):
+        enabled=self._file_job is None and bool(ids)
+        if table is self.cat_table:
+            can_apply=enabled and all(self.core.can_edit(i) for i in ids)
+            self.add_one.setEnabled(can_apply)
+            limit=min((self.core.native[i].limit for i in ids),default=0) if can_apply else 0
+            self.add_bulk.setEnabled(can_apply and self.qty.value()<=limit)
+            self.add_bulk.setToolTip(self.msg(f'Лимит для выбранных: {limit}',f'Selection limit: {limit}') if can_apply else '')
+        else:
+            self.del_bulk.setEnabled(enabled and all(self.core.can_delete(i) for i in ids))
 
     def show_changes(self,save_mode=None):
         from qt_changes_dialog import ChangesDialog
@@ -1105,6 +1297,7 @@ class MainWindow(QMainWindow):
 
     def show_toast(self,ru,en):
         self._notice_text=(ru,en);self.notice.setText(self.msg(ru,en))
+        self.notice.setToolTip('')
         self._position_notice();self.notice.show();self.notice.raise_();self.notice_timer.start(3600)
 
     def _handle(self,action):
@@ -1119,7 +1312,30 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self,self.msg('Ошибка','Error'),error_text(exc,self.language))
             return None
 
+    def _run_file(self,action,complete):
+        if self._file_job is not None or self._close_after_work:
+            return False
+        self._file_complete=complete
+        self._file_job=self._file_pool.submit(action)
+        self.file_timer.start()
+        self.refresh_save_labels()
+        return True
+
+    def _finish_file_job(self):
+        job=self._file_job
+        if job is None or not job.done():
+            return
+        self.file_timer.stop()
+        complete=self._file_complete
+        self._file_job=self._file_complete=None
+        self._handle(lambda:complete(job.result()))
+        self.refresh_save_labels()
+        if self._close_after_work:
+            QTimer.singleShot(0,self.close)
+
     def _apply(self,changes):
+        if self._file_job is not None:
+            return
         def run():
             before=self.core.save.quantities if self.core.save else None
             self.core.change(changes)
@@ -1129,18 +1345,18 @@ class MainWindow(QMainWindow):
         return self._handle(run)
 
     def apply_single(self):
-        if self.active_item_id is None:return
+        if not self.core.can_edit(self.active_item_id):return
         self._apply({self.active_item_id:self.qty.value()})
 
     def apply_bulk(self,qty=None):
         ids=self.selected_ids(self.cat_table)
         if not ids:
-            QMessageBox.information(self,'CS1',self.msg('Выбери предметы в каталоге','Select items in the catalog'));return
+            QMessageBox.information(self,'CS1',self.msg('Выберите предметы в каталоге','Select items in the catalog'));return
         amount=self.qty.value() if qty is None else qty
         self._apply({i:amount for i in ids})
 
     def delete_single(self):
-        if self.active_item_id is not None:self._apply({self.active_item_id:0})
+        if self.core.can_delete(self.active_item_id):self._apply({self.active_item_id:0})
 
     def delete_bulk(self):
         ids=self.selected_ids(self.inv_table)
@@ -1148,23 +1364,29 @@ class MainWindow(QMainWindow):
             self._apply({i:0 for i in ids})
 
     def undo(self):
+        if self._file_job is not None:return
         changed=self._handle(lambda:self.core.undo())
-        self.populate_categories();self.update_tables();self.show_item(self.active_item_id)
-        if changed:self.show_toast('Последнее изменение отменено','Last change undone')
+        if changed:
+            self.populate_categories()
+            self.update_tables()
+            self._refresh_selected_item()
+            self.show_toast('Последнее изменение отменено','Last change undone')
 
     def reset(self):
+        if self._file_job is not None:return
         if self.core.save and QMessageBox.question(self,'CS1',self.msg('Сбросить несохранённые изменения?', 'Discard unsaved changes?'))==QMessageBox.StandardButton.Yes:
             self.core.reset();self.populate_categories();self.update_tables();self.show_item(self.active_item_id)
             self.show_toast('Правки сброшены к исходному файлу','Edits reset to the original file')
 
     def favorite(self):
-        if self.active_item_id is None:return
-        self._handle(lambda:self.core.toggle_favorite(self.active_item_id))
+        item_id=self.active_item_id
+        if not isinstance(item_id,int):return
+        self._handle(lambda:self.core.toggle_favorite(item_id))
         self.populate_categories();self.update_tables()
-        if self.active_item_id is not None:
-            self.favorite_btn.setText('★' if self.active_item_id in self.core.favorites else '☆')
-            if self.active_item_id in self.core.favorites:self.show_toast('Предмет добавлен в избранное','Item added to favorites')
-            else:self.show_toast('Предмет удалён из избранного','Item removed from favorites')
+        added=item_id in self.core.favorites
+        if self.active_item_id==item_id:self.favorite_btn.setText('★' if added else '☆')
+        if added:self.show_toast('Предмет добавлен в избранное','Item added to favorites')
+        else:self.show_toast('Предмет удалён из избранного','Item removed from favorites')
 
     def confirm_dirty(self):
         if (self.core.save and self.core.save.changed) or self.has_pending_quantity():
@@ -1173,6 +1395,7 @@ class MainWindow(QMainWindow):
         return True
 
     def open_save_dialog(self):
+        if self._file_job is not None:return
         if self.core.storage:
             filename, _ = QFileDialog.getOpenFileName(
                 self, self.msg('Открыть сохранение Steam', 'Open a Steam save'),
@@ -1191,20 +1414,21 @@ class MainWindow(QMainWindow):
             self.load_latest()
 
     def open_save(self, path: Path | None = None):
-        source = self._handle(lambda: self.core.open_save(path))
-        if source is None:
-            return False
+        return self._run_file(lambda:self.core.read_save(path),self._open_save_finished)
+
+    def _open_save_finished(self,session):
+        source=self.core.use_opened_save(session)
         for table in (self.cat_table, self.inv_table):
-            with QSignalBlocker(table):
-                table.clearSelection()
+            with QSignalBlocker(table.selectionModel()):
+                table.selectionModel().clear()
         self.show_item(None)
         self.populate_categories()
+        self.update_tables()
         self.navigate_section('inventory')
         self.show_toast(f'Сохранение открыто: {source.name}', f'Save opened: {source.name}')
-        return True
 
     def load_latest(self):
-        if not self.confirm_dirty():
+        if self._file_job is not None or not self.confirm_dirty():
             return
         if self.core.storage:
             self.open_save()
@@ -1212,14 +1436,17 @@ class MainWindow(QMainWindow):
         if not self.core.load_demo():
             self.show_toast('Сначала загрузите каталог игры.', 'Load the game catalog first.')
             return
-        self.active_item_id = None
+        for table in (self.cat_table,self.inv_table):
+            with QSignalBlocker(table.selectionModel()):
+                table.selectionModel().clear()
+        self.show_item(None)
         self.populate_categories()
         self.update_tables()
         self.navigate_section('inventory')
         self.show_toast('Учебный инвентарь загружен.', 'Sample inventory loaded.')
 
     def save_copy_dialog(self):
-        if self.core.save is None or not self.show_changes('copy'):
+        if self._file_job is not None or self.core.save is None or not self.show_changes('copy'):
             return
         source = self.core.source
         if source is None:
@@ -1230,25 +1457,32 @@ class MainWindow(QMainWindow):
             options=QFileDialog.Option.DontConfirmOverwrite,
         )
         if filename:
-            destination = self._handle(lambda: self.core.save_copy(Path(filename)))
-            if destination:
-                self.show_toast(f'Копия сохранена: {destination.name}', f'Copy saved: {destination.name}')
-                self.notice.setToolTip(str(destination))
+            write=partial(self.core.storage.save_copy,self.core.save,Path(filename),self.core.native)
+            self._run_file(write,self._save_copy_finished)
+
+    def _save_copy_finished(self,destination):
+        self.show_toast(f'Копия сохранена: {destination.name}', f'Copy saved: {destination.name}')
+        self.notice.setToolTip(str(destination))
 
     def overwrite_dialog(self):
-        if not self.core.save or not self.core.save.changed or not self.show_changes('overwrite'):
+        if self._file_job is not None or not self.core.save or not self.core.save.changed:
             return
-        if self.core.source is None:
+        if not self.show_changes('overwrite') or self.core.source is None:
             return
-        backup = self._handle(self.core.overwrite)
+        write=partial(self.core.storage.overwrite,self.core.save,self.core.native)
+        self._run_file(write,self._overwrite_finished)
+
+    def _overwrite_finished(self,result):
+        session,backup=result
+        self.core.use_overwritten_save(session,backup)
+        self.update_tables()
+        self._refresh_selected_item()
         if backup:
-            self.update_tables()
-            self.show_item(self.active_item_id)
             self.show_toast(f'Сохранено. Резервная копия: {backup.name}', f'Saved. Backup: {backup.name}')
             self.notice.setToolTip(str(backup))
 
     def compare_dialog(self):
-        if self.core.save is None:
+        if self._file_job is not None or self.core.save is None:
             return
         source = self.core.source
         if source:
@@ -1257,17 +1491,22 @@ class MainWindow(QMainWindow):
             )
             if not filename:
                 return
-            result = self._handle(lambda: self.core.compare(Path(filename)))
-            if result is None:
-                return
-            added, removed, modified = result
-            heading = self.msg(f'Текущий инвентарь относительно {Path(filename).name}',
-                               f'Current inventory compared with {Path(filename).name}')
+            path=Path(filename)
+            self._run_file(lambda:self.core.compare(path),lambda result:self._show_comparison(result,path.name))
+            return
         else:
             self.edit_changes.refresh(self.core.save)
             counts = self.edit_changes.counts()
-            added, removed, modified = (counts[key] for key in ('added', 'removed', 'modified'))
-            heading = self.msg('Сравнение с исходным учебным инвентарём.', 'Comparison with the original sample inventory.')
+            self._show_comparison(tuple(counts[key] for key in ('added','removed','modified')))
+
+    def _show_comparison(self,result,filename=None):
+        if self._close_after_work:
+            return
+        added,removed,modified=result
+        if filename:
+            heading=self.msg(f'Сравнение текущего инвентаря с файлом {filename}',f'Current inventory compared with {filename}')
+        else:
+            heading=self.msg('Сравнение с исходным учебным инвентарём.','Comparison with the original sample inventory.')
         summary = self.msg(
             f'{heading}\n\nДобавлено: {added}\nУдалено: {removed}\nИзменено: {modified}',
             f'{heading}\n\nAdded: {added}\nRemoved: {removed}\nModified: {modified}',
@@ -1279,9 +1518,9 @@ class MainWindow(QMainWindow):
         if folder:self.scan_game(Path(folder))
 
     def scan_game(self,path=None,silent=False):
-        if self.scan_thread is not None:return
+        if self.scan_thread is not None or self._close_after_work:return
         self._scan_started_in_setup=self.pages.currentWidget() is self.startup_page
-        self._scan_busy=True;self._scan_stage='locating';self._scan_error='';self._scan_error_details=''
+        self._scan_busy=True;self._scan_stage='locating';self._scan_error='';self._scan_error_details=('','')
         self._scan_warning_count=0;self._scan_succeeded=False;self._scan_silent=silent
         self.scan_state.setText(self.msg('Ищем игру и загружаем каталог…','Locating the game and loading the catalog…'))
         self.refresh_startup()
@@ -1294,8 +1533,8 @@ class MainWindow(QMainWindow):
         self.scan_worker.error.connect(self.on_scan_error)
         self.scan_worker.finished.connect(self.scan_thread.quit)
         self.scan_worker.finished.connect(self.scan_worker.deleteLater)
-        self.scan_thread.finished.connect(self.scan_thread.deleteLater)
         self.scan_thread.finished.connect(self.on_scan_finished)
+        self.scan_thread.finished.connect(self.scan_thread.deleteLater)
         self.scan_thread.start()
 
     @Slot(str)
@@ -1307,10 +1546,11 @@ class MainWindow(QMainWindow):
         self._scan_stage='saving';self.refresh_startup()
         try:self.core.apply_scan_result(result)
         except Exception as exc:
-            self.on_scan_error(str(exc),self._scan_silent);return
+            self.on_scan_error(exc,self._scan_silent);return
         self._scan_succeeded=True;self._scan_error=''
         self._scan_warning_count=len(result.errors)
-        self._scan_error_details='\n'.join(result.errors[:6])
+        details='\n'.join(result.errors[:6])
+        self._scan_error_details=tuple(error_text(details,lang) for lang in ('ru','en'))
         self.refresh_catalog()
         self.scan_state.setText(self.scan_summary(result))
         if result.errors and not self._scan_started_in_setup and not self._scan_silent:
@@ -1321,12 +1561,12 @@ class MainWindow(QMainWindow):
         return self.msg(f'Сканировано таблиц: {n}, предметов: {m}',
                         f'Scanned {n} '+('table' if n==1 else 'tables')+f'; {m} '+('item' if m==1 else 'items'))
 
-    @Slot(str)
+    @Slot(object)
     def on_scan_error(self,error,silent=False):
         silent=silent or self._scan_silent
         self._scan_succeeded=False
-        self._scan_error='not_found' if error=='Game directory not found' else 'unreadable'
-        self._scan_error_details=error
+        self._scan_error='not_found' if str(error)=='Game directory not found' else 'unreadable'
+        self._scan_error_details=tuple(error_text(error,lang) for lang in ('ru','en'))
         self.scan_state.setText(self.msg('Каталог не удалось загрузить. Выберите папку игры.',
                                         'The catalog could not be loaded. Choose the game folder.'))
         self.refresh_startup()
@@ -1338,8 +1578,10 @@ class MainWindow(QMainWindow):
         self.scan_thread=None;self.scan_worker=None;self._scan_busy=False
         self.refresh_startup()
         if self._scan_succeeded:
-            count=len(self.core.visible())
+            count=len(self._catalog_view())
             self.show_toast(f'Каталог загружен. Предметов: {count}',f'Catalog loaded. Items: {count}')
+        if self._close_after_work:
+            QTimer.singleShot(0,self.close)
 
     def open_save_dir(self):
         if self.core.storage and self.core.save_directory.is_dir():
@@ -1352,40 +1594,59 @@ class MainWindow(QMainWindow):
         self.show_report(self.msg('Непереведённые записи','Untranslated records'),missing)
 
     def import_english_dialog(self):
+        if self._file_job is not None:return
         path,_=QFileDialog.getOpenFileName(self,self.msg('Импорт оригинального английского каталога','Import an original English catalog'),'',
                                           'Cold Steel I catalog (*.tbl)')
         if not path:return
-        count=self._handle(lambda:self.core.import_english_catalog(path))
-        if count:
-            self.refresh_catalog()
-            self.show_toast(f'Английский каталог загружен: {count} предметов',f'English catalog loaded: {count} items')
+        self._run_file(lambda:read_english_catalog(Path(path)),self._english_catalog_finished)
+
+    def _english_catalog_finished(self,records):
+        self.core.english=records
+        self.refresh_catalog()
+        count=len(records)
+        self.show_toast(f'Английский каталог загружен: {count} предметов',f'English catalog loaded: {count} items')
 
     def refresh_catalog(self):
-        pending=self.qty.value();edited=self._quantity_user_edited;active=self.active_item_id
-        self._icon_pixmaps.clear();self._table_rows.clear()
-        self._category_icons.clear()
-        self._view_catalog=None
-        self.populate_categories();self.update_tables()
-        self.show_item(active)
-        if edited and active is not None:
-            self.qty.setValue(pending);self._quantity_user_edited=True
+        catalog_changed=self._view_catalog is not self.core.catalog
+        self.populate_categories()
+        self.update_tables()
+        if catalog_changed:
+            for table in (self.cat_table,self.inv_table):
+                table.model().refresh_icons()
+        self._refresh_selected_item()
+
+    def _refresh_selected_item(self):
+        pending=self.qty.value()
+        edited=self.has_pending_quantity()
+        self.show_item(self.active_item_id)
+        if edited and self.core.can_edit(self.active_item_id):
+            self.qty.setValue(pending)
+            self._quantity_user_edited=True
+            self.refresh_quantity_note()
 
     def icon_report(self):
         missing=[]
         for i,record in self.core.visible().items():
-            if self._icon(i,record).isNull():missing.append(f'{i}: {self.core.item_name(i)}')
+            if self._icon(i).isNull():missing.append(f'{i}: {self.core.item_name(i)}')
         self.show_report(self.msg('Отсутствующие оригинальные иконки','Missing original icons'),missing)
 
     def show_report(self,title,lines,count=True):
         prefix=(self.msg('Найдено: ','Found: ')+str(len(lines))+'\n') if count else ''
-        QMessageBox.information(self,title,prefix+'\n'.join(lines[:60]))
+        message=prefix+'\n'.join(lines[:60])
+        if len(lines)>60:
+            remaining=len(lines)-60
+            message+=self.msg(f'\n… ещё {remaining}',f'\n… {remaining} more')
+        QMessageBox.information(self,title,message)
 
     def export_csv(self):
-        if not self.core.save:return
-        filename,_=QFileDialog.getSaveFileName(self,'CSV','CS1_inventory.csv','CSV (*.csv)')
+        if self._file_job is not None or not self.core.save:return
+        filename,_=QFileDialog.getSaveFileName(
+            self,self.msg('Экспорт инвентаря','Export inventory'),'CS1_inventory.csv','CSV (*.csv)',
+            options=QFileDialog.Option.DontConfirmOverwrite)
         if not filename:return
-        destination=self._handle(lambda:self.core.export_csv(filename))
-        if destination:self.show_toast('CSV сохранён: '+destination.name,'CSV exported: '+destination.name)
+        rows=self.core.export_rows()
+        self._run_file(partial(write_csv,Path(filename),rows,self.language),
+                       lambda path:self.show_toast('CSV сохранён: '+path.name,'CSV exported: '+path.name))
 
     def refresh_save_labels(self):
         self.edit_changes.refresh(self.core.save)
@@ -1394,13 +1655,10 @@ class MainWindow(QMainWindow):
         backup = self.core.last_backup
         if source:
             self.rail_file.setText(source.name)
-            folder = str(source.parent)
-            self.rail_folder.setText(QFontMetrics(self.rail_folder.font()).elidedText(
-                folder, Qt.TextElideMode.ElideMiddle, max(90, self.rail_panel.width() - 52)))
-            self.rail_folder.setToolTip(folder)
+            self.rail_folder.setText(str(source.parent))
             stamp = self.core.save.modified_at
             self.rail_date.setText(datetime.fromtimestamp(stamp).strftime('%d.%m.%Y %H:%M') if stamp else '—')
-            self.rail_state.setText(self.msg('Резервная копия создана','Backup created') if backup else
+            self.rail_state.setText(self.msg('Копия создана','Backup created') if backup else
                                     self.msg('Файл загружен','File loaded'))
             self.save_line.setText(self.msg(f'Открыто: {source}', f'Opened: {source}'))
         else:
@@ -1410,9 +1668,14 @@ class MainWindow(QMainWindow):
             self.rail_date.setText('—')
             self.rail_state.setText(self.msg('Образец загружен','Sample loaded') if loaded else self.msg('Нет данных','No data'))
             self.save_line.setText(self.msg('Учебный инвентарь · правки в памяти','Sample inventory · edits in memory')
-                                   if loaded else self.msg('Откройте сохранение Steam.', 'Open a Steam save.'))
+                                   if loaded else self.msg('Сохранение Steam не открыто.','No Steam save open.'))
         self.rail_state.setToolTip(str(backup) if backup else '')
-        if self.core.save and self.core.save.changed:
+        busy=self._file_job is not None
+        dirty=bool(self.core.save and self.core.save.changed)
+        if busy:
+            state='dirty'
+            status=self.msg('РАБОТА С ФАЙЛОМ…','FILE OPERATION IN PROGRESS…')
+        elif dirty:
             state='dirty'
             status=self.msg('● ЕСТЬ ПРАВКИ','● UNSAVED EDITS')
         elif self.core.save:
@@ -1430,26 +1693,46 @@ class MainWindow(QMainWindow):
         self.dirty_chip.setToolTip(str(backup) if backup else self.msg('Правки хранятся в памяти до записи.',
                                                                       'Edits are kept in memory until saved.'))
         visible=self._catalog_view();n=self.core.save.occupied_count if self.core.save else 0
-        rows=self.cat_table.rowCount() if getattr(self,'current_section','catalog')=='catalog' else self.inv_table.rowCount()
-        favorite_view=self.cat_favorites_only if getattr(self,'current_section','catalog')=='catalog' else self.inv_favorites_only
-        caption=self.msg('Избранное','Favorites') if favorite_view else self.msg('В выбранной группе','In this view')
-        self.footer.setText(self.msg(f'Каталог: {len(visible)} предметов',f'Catalog: {len(visible)} items')+f'   |   {caption}: {rows}')
         self.footer_aux.setText(self.msg(f'Инвентарь: {n}   ·   Правок: {len(self.edit_changes.changes)}',f'Inventory: {n}   ·   Edits: {len(self.edit_changes.changes)}'))
         self.review_button.setText(self.msg(f'Правки: {len(self.edit_changes.changes)}',f'Edits: {len(self.edit_changes.changes)}'))
-        self.review_button.setVisible(bool(self.core.save and self.core.save.changed))
+        self.review_button.setVisible(dirty)
         self.review_button.setToolTip(self.msg('Просмотреть все изменения перед записью','Review every change before saving'))
         for button in (self.cat_quick_favorite,self.inv_quick_favorite):
-            button.setToolTip(self.msg(f'Избранное: {len(self.core.favorites)} · нажми для фильтра',f'Favorites: {len(self.core.favorites)} · click to filter'))
+            button.setToolTip(self.msg(f'Избранное: {len(self.core.favorites)} · нажмите, чтобы отфильтровать список',
+                                       f'Favorites: {len(self.core.favorites)} · click to filter'))
         self.refresh_quantity_note()
-        self.apply_btn.setEnabled(self.core.can_edit(self.active_item_id))
-        self.delete_btn.setEnabled(self.core.can_delete(self.active_item_id))
-        self.undo_btn.setEnabled(bool(self.core.undo_stack))
-        self.reset_btn.setEnabled(bool(self.core.save and self.core.save.changed))
-        self.btn_compare.setEnabled(self.core.save is not None)
-        self.btn_savecopy.setEnabled(self.core.save is not None)
-        self.btn_overwrite.setEnabled(bool(self.core.save and self.core.save.changed and
-                                           (source is None or source.suffix.lower() == '.dat')))
+        self._refresh_bulk_controls(self.cat_table,self.selected_ids(self.cat_table))
+        self._refresh_bulk_controls(self.inv_table,self.selected_ids(self.inv_table))
+        can_undo=not busy and bool(self.core.undo_stack)
+        can_reset=not busy and dirty
+        can_use_save=not busy and loaded
+        self.undo_btn.setEnabled(can_undo)
+        self.reset_btn.setEnabled(can_reset)
+        self.btn_latest.setEnabled(not busy)
+        self.btn_open.setEnabled(not busy)
+        self.btn_compare.setEnabled(can_use_save)
+        self.btn_savecopy.setEnabled(can_use_save)
+        self.btn_overwrite.setEnabled(can_reset and (source is None or source.suffix.lower()=='.dat'))
+        for key,enabled in (
+                ('Последнее сохранение',not busy),('Учебный инвентарь',not busy),('Открыть вручную',not busy),
+                ('Просмотр правок',loaded),('Сравнить два файла',can_use_save),
+                ('Экспорт инвентаря в CSV',can_use_save),('Импорт английского каталога',not busy),
+                ('Отменить изменение',can_undo),('Сбросить изменения',can_reset)):
+            if key in self.tool_btns:
+                self.tool_btns[key].setEnabled(enabled)
         self.refresh_startup(len(visible))
+
+    def _refresh_view_footer(self):
+        if self.pages.currentWidget() is self.startup_page:
+            self.footer.setText(self.msg('Начало работы','Getting started'))
+            return
+        visible=len(self._catalog_view())
+        section=getattr(self,'current_section','catalog')
+        catalog=section=='catalog'
+        rows=(self.cat_table if catalog else self.inv_table).model().rowCount()
+        caption=self.msg('Избранное','Favorites') if (self.cat_favorites_only if catalog else self.inv_favorites_only) else self.msg('В выбранной группе','In this view')
+        total=self.msg(f'Позиций в каталоге: {visible}',f'Catalog entries: {visible}')
+        self.footer.setText(total if section=='tools' else f'{total}   |   {caption}: {rows}')
 
     def keyPressEvent(self,event):
         k=event.key();mods=event.modifiers()
@@ -1462,11 +1745,15 @@ class MainWindow(QMainWindow):
         else:super().keyPressEvent(event)
 
     def closeEvent(self,event):
+        if self._file_job is not None or self.scan_thread is not None:
+            self._close_after_work=True
+            event.ignore()
+            return
+        self._close_after_work=False
         if not self.confirm_dirty():event.ignore();return
-        if self.scan_thread and self.scan_thread.isRunning():
-            QMessageBox.information(self,'CS1',self.msg('Дождись завершения сканирования игры.',
-                                                   'Please wait until game scanning finishes.'))
-            event.ignore();return
+        self.initial_load_timer.stop()
+        self._file_pool.shutdown(wait=False)
+        QApplication.instance().removeTranslator(self._qt_translation)
         super().closeEvent(event)
 
 
@@ -1487,8 +1774,8 @@ GROUP_EN={'quartz':'Quartz','equipment':'Equipment','consumables':'Consumables',
  'library':'Books & recipes','cosmetics':'Cosmetics','fishing':'Fishing','special':'Other items'}
 CATEGORY_EN={'quartz_normal':'Standard quartz','quartz_master':'Master quartz',
  'weapon':'Weapons','armor':'Armor','shoes':'Footwear','accessory':'Accessories',
- 'consumable':'Healing & combat','food':'Prepared dishes','ingredient':'Ingredients',
- 'recipe':'Recipes','book':'Books & magazines','costume':'Outfits','face':'Cosmetic accessories',
- 'hair':'Hairstyles','decoration':'Decorations','fish':'Fish','fishing_gear':'Fishing gear',
- 'quest':'Quest & key items','material':'Materials & sepith','card':'Cards & minigames',
- 'orbment':'EX Orbs & upgrades','other':'Other'}
+ 'consumable':'Battle items','food':'Prepared dishes','ingredient':'Ingredients',
+ 'recipe':'Recipes','book':'Books & magazines','costume':'Outfits','face':'Cosmetic gear',
+ 'decoration':'ARCUS covers','fish':'Fish','fishing_gear':'Fishing gear','fish_book':'Fishing notebooks',
+ 'quest':'Quest & key items','material':'Materials & sepith','card':'Minigame items',
+ 'orbment':'Quest orbs','dlc_pack':'DLC packs','other':'Other'}

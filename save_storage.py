@@ -1,7 +1,7 @@
 """Inventory sessions and the file adapter for Cold Steel I on Steam."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+import os
 from pathlib import Path
 import re
 
@@ -9,15 +9,26 @@ from cs1 import SLOTS, Save
 from item_catalog import CatalogItem
 
 
-STEAM_SAVE_DIRECTORY = Path.home() / "Saved Games" / "Falcom" / "ed8"
+def _saved_games() -> Path:
+    if os.name == "nt":
+        import ctypes
+        from uuid import UUID
+
+        folder_id = (ctypes.c_ubyte * 16).from_buffer_copy(
+            UUID("4c5c32ff-bb9d-43b0-b5b4-2d72e54eaaa4").bytes_le
+        )
+        result = ctypes.c_wchar_p()
+        status = ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(folder_id), 0, None, ctypes.byref(result))
+        try:
+            if status == 0 and result.value:
+                return Path(result.value)
+        finally:
+            ctypes.windll.ole32.CoTaskMemFree(result)
+    return Path.home() / "Saved Games"
+
+
+STEAM_SAVE_DIRECTORY = _saved_games() / "Falcom" / "ed8"
 SLOT_NAME = re.compile(r"(?:save\d{3}|autosave\d{2})\.dat", re.IGNORECASE)
-
-
-@dataclass(frozen=True)
-class Entry:
-    slot: int
-    item_id: int
-    quantity: int
 
 
 class InventorySession:
@@ -32,13 +43,6 @@ class InventorySession:
     @property
     def occupied_count(self) -> int:
         return len(self.quantities)
-
-    def items(self) -> list[Entry]:
-        return [
-            Entry(slot, item_id, quantity)
-            for slot, (item_id, quantity) in enumerate(self.quantities.items())
-        ]
-
 
 class SteamInventorySession(InventorySession):
     capacity = SLOTS
@@ -66,7 +70,7 @@ class SteamSaveStorage:
                 if SLOT_NAME.fullmatch(path.name):
                     try:
                         candidates.append((path.stat().st_mtime_ns, path))
-                    except FileNotFoundError:
+                    except OSError:
                         continue
         for _, path in sorted(candidates, key=lambda entry: (entry[0], entry[1].name), reverse=True):
             try:

@@ -16,11 +16,13 @@ from save_storage import SteamSaveStorage
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument("--game", type=Path, help="Cold Steel I installation directory")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--save", type=Path, help="Open a Cold Steel I save file")
     mode.add_argument("--demo", action="store_true", help="Use the sample inventory")
     parser.add_argument("--smoke-test", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--smoke-test-clean", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     app = QApplication(sys.argv[:1])
@@ -31,12 +33,15 @@ def main() -> int:
     for role in (QPalette.ColorRole.ButtonText, QPalette.ColorRole.Text, QPalette.ColorRole.WindowText):
         palette.setColor(role, QColor("#f2e9e8"))
     app.setPalette(palette)
-    temporary = TemporaryDirectory(prefix="cs1-smoke-") if args.smoke_test else None
+    temporary = TemporaryDirectory(prefix="cs1-smoke-") if args.smoke_test or args.smoke_test_clean else None
     profile = (
         QSettings(str(Path(temporary.name) / "profile.ini"), QSettings.Format.IniFormat)
         if temporary else None
     )
-    window = MainWindow(EditorCore(args.game, profile=profile, storage=None if args.demo else SteamSaveStorage()))
+    core = EditorCore(args.game, profile=profile, storage=None if args.demo else SteamSaveStorage())
+    if args.smoke_test_clean:
+        core.set_language("en")
+    window = MainWindow(core)
     screen = app.primaryScreen()
     if screen is not None:
         available = screen.availableGeometry()
@@ -45,6 +50,23 @@ def main() -> int:
             min(window.height(), max(window.minimumHeight(), available.height())),
         )
     window.show()
+    if args.smoke_test_clean:
+        window.initial_load_timer.stop()
+        window.scan_game(Path(temporary.name) / "missing-install", silent=True)
+
+        def check_clean_start():
+            if window.scan_thread is not None:
+                return
+            clean_poll.stop()
+            ready = (window.isVisible() and window.startup_page.isVisible() and not core.catalog
+                     and not window.btn_overwrite.isEnabled() and not window.btn_savecopy.isEnabled())
+            window.close()
+            app.exit(0 if ready else 2)
+
+        clean_poll = QTimer(window)
+        clean_poll.timeout.connect(check_clean_start)
+        clean_poll.start(100)
+        QTimer.singleShot(12000, lambda: app.exit(3))
     if args.save:
         QTimer.singleShot(0, lambda: window.open_save(args.save))
 
@@ -56,12 +78,15 @@ def main() -> int:
                 return
             window.navigate_section("catalog")
             ready = (
-                window.isVisible() and window.cat_table.rowCount() > 0
-                and not window.centralWidget().wall.isNull()
+                window.isVisible() and window.cat_table.model().rowCount() > 0
+                and not window.centralWidget().texture.isNull()
+                and not window.rail_watermark.mark.isNull()
                 and not window.header.academy.isNull()
-                and not window._icon(0, window.core.catalog.get(0, {})).isNull()
+                and not window._icon(0).isNull()
+                and all(0 in window.core.translations.get(language, {}) for language in ("ru", "en"))
                 and (args.save is None or window.core.source == args.save.resolve())
             )
+            window.close()
             app.exit(0 if ready else 2)
 
         poll.timeout.connect(check_window)

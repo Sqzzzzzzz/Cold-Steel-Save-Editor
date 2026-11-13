@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ItemChange:
     item_id: int
     before: int
@@ -19,11 +19,10 @@ class EditChanges:
         self.before={}
         self.current={}
         self.changes={}
-        self.reordered=False
 
     def refresh(self,save):
         if save is None:
-            self._original=None;self.before={};self.current={};self.changes={};self.reordered=False
+            self._original=None;self.before={};self.current={};self.changes={}
             return
         # The engine retains immutable original bytes across undo/reset. Read
         # them once per baseline; never change the engine's saved snapshots.
@@ -36,8 +35,6 @@ class EditChanges:
         self.changes={i:ItemChange(i,self.before.get(i,0),self.current.get(i,0))
                       for i in sorted(self.before.keys()|self.current.keys())
                       if self.before.get(i,0)!=self.current.get(i,0)}
-        self.reordered=([i for i in self.before if i in self.current]
-                        !=[i for i in self.current if i in self.before])
 
     def counts(self):
         return {kind:sum(change.kind==kind for change in self.changes.values())

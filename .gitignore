@@ -1,9 +1,16 @@
 /.venv/
+/.venv*/
 /assets/
 /build/
 /dist/
+/.pytest_cache/
+/.ruff_cache/
+/release/
 /*.spec
 __pycache__/
 *.pyc
 *.dat
 *.bak
+*.vdf
+.env
+.env.*

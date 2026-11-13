@@ -1,56 +1,92 @@
 # Cold Steel I Inventory Editor
 
-Локальный редактор инвентаря Cold Steel I для Steam на Windows. Главное окно, вкладки, размеры панелей, инструменты, диалоги и горячие клавиши перенесены из [Cold Steel IV Inventory Editor](https://github.com/Sqzzzzzzz/Cold-Steel-IV-Save-Editor). Режим работы на учебных данных следует подходу [Cold Steel III Inventory Editor](https://github.com/Sqzzzzzzz/Cold-Steel-3-Inventory-Editor-RU-ENG-).
+[![Windows build](https://github.com/Sqzzzzzzz/Cold-Steel-Save-Editor/actions/workflows/windows.yml/badge.svg)](https://github.com/Sqzzzzzzz/Cold-Steel-Save-Editor/actions/workflows/windows.yml)
+[![Latest release](https://img.shields.io/github/v/release/Sqzzzzzzz/Cold-Steel-Save-Editor)](https://github.com/Sqzzzzzzz/Cold-Steel-Save-Editor/releases/latest)
+[![MIT license](https://img.shields.io/badge/code-MIT-blue)](LICENSE)
 
-Редактор читает слоты XSEED PC версии 8. Предметы и допустимые количества берутся из таблицы `data/text/dat_us/t_item.tbl` установленной игры. Правки остаются в памяти до записи. При перезаписи редактор сверяет файл с открытой версией, создаёт резервную копию `*.bak` рядом и заменяет слот. Запись отдельной копии оставляет открытый слот нетронутым.
+A Windows inventory editor for **The Legend of Heroes: Trails of Cold Steel I** on PC (Steam). Browse the installed game's catalog, review edits before writing, and keep a byte-for-byte backup of the original slot.
 
-Русский и английский языки переключаются в шапке. Названия и описания берутся из установленной таблицы игры. В исходной Steam-установке они английские.
+![Catalog in the running editor with sample data and the default artwork fallback](docs/editor.png)
 
-## Запуск
+*The screenshot shows the running editor with sample data and without the optional local artwork.*
 
-В PowerShell из папки проекта:
+## Features
+
+- Search by name, ID or description. Filter by category, ownership and source, and sort the catalog or inventory.
+- Add items, change quantities, remove items and apply supported changes to multiple selections. Review, undo or reset edits before saving.
+- Open the most recent compatible save, compare inventory counts between two saves, and export the inventory to CSV.
+- Save a separate copy or overwrite the current slot with a timestamped backup.
+- Switch the interface between English and Russian. The editor reads item names and descriptions from the installed game and accepts a local bilingual item-text pack.
+- Browse fishing records and DLC listings from the game's tables. Entries such as fishing journal records, DLC packs and equipped master quartz have editing restrictions.
+
+## Requirements and installation
+
+- 64-bit Windows 10 or 11. The Windows build includes Python and Qt.
+- The Steam PC installation of **Trails of Cold Steel I**, with its item table at `data/text/dat_us/t_item.tbl`.
+- A version-8 XSEED PC save (460,992 bytes) for inventory editing. Other games, console saves and other PC editions are outside the verified scope.
+
+Download the Windows ZIP from [Latest Release](https://github.com/Sqzzzzzzz/Cold-Steel-Save-Editor/releases/latest), extract the whole folder and run `Cold_Steel_I_Inventory_Editor.exe`. Keep the `_internal` directory beside the EXE. The accompanying `SHA256SUMS.txt` contains the archive checksum. On Windows, compare it against the output of `Get-FileHash -Algorithm SHA256 <archive.zip>`.
+
+The portable build reads the English catalog from your Steam installation. Optional artwork and the bilingual catalog are loaded from `_internal/assets` when present. See [Local artwork and item text](#local-artwork-and-item-text).
+
+## Using the editor
+
+1. Start the editor. If Steam detection does not find the game, use **Tools → Scan game folder** and select the directory containing `ed8.exe`.
+2. Use **Latest save** (F5) or **Open manually** (Ctrl+O). The latest-save search uses the Windows Saved Games folder under `Falcom\ed8`, or the last folder you opened. It checks slot names such as `save019.dat` and `autosave00.dat`, skipping incompatible files.
+3. In **Item catalog** or **My inventory**, select a row. Enter the desired quantity and choose **Apply quantity**. You can remove an item with **Delete from save**. These actions edit the in-memory inventory.
+4. Open **Review changes** to confirm the changes. Use **Save a copy** (Ctrl+S) to create a new `.dat`, or **Save with backup** to update the open slot. Close the game before overwriting a slot.
+5. Use the language selector in the top bar to switch between English and Russian.
+
+### Backups and recovery
+
+**Save with backup** checks whether the slot has changed since opening, creates `<slot>.<timestamp>.bak` beside the slot and writes the edited inventory. If a competing Windows replacement is detected, the editor reports the additional recovery file ending in `.displaced.bak`.
+
+To restore a backup, open its `.bak` file with **Open manually** and use **Save a copy** to write it as a new `.dat`. To use the restored copy in the game, close the game, keep a separate copy of the target slot, then replace that existing slot file with the restored copy. An exported file does not create a new entry in the game's slot index.
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| Game directory not found | Choose the installation containing `ed8.exe` and `data/text/dat_us/t_item.tbl`. The editor also looks in additional libraries registered by Steam. |
+| No compatible save found | Open a version-8 Steam slot manually. Files such as `sdslot.dat`, thumbnails and autosave sidecars are separate from the save slot. |
+| Source changed or write access denied | Close the game, allow Steam Cloud to finish, and reopen the slot. You can also save a separate copy to a writable folder. |
+| Russian item names are placeholders | The Russian interface works independently. Add a local bilingual item-text pack, or switch to English to read the original catalog. |
+| Game artwork is missing | The portable package uses the editor's fallback visuals. Install local assets and restart. |
+
+## Known limitations
+
+- Editing is limited to the inventory block. The editor leaves progression, sepith balances, equipped master quartz, slot indexes and thumbnails alone.
+- Structural validation covers the save header, file size and inventory records. It does not validate every field in the game state.
+- DLC listings reflect the installed tables. The editor does not change Steam ownership or unlock packages.
+- Some items share their native inventory icon. Original item text and some icon artwork are optional local resources.
+- Windows builds are unsigned.
+
+## Local artwork and item text
+
+The complete theme uses locally supplied game artwork and an optional bilingual item-text pack. A binary build loads those files from `_internal/assets`; a source build loads them from `assets`. For example, `assets/item-text.json` is a UTF-8 object with `en` and `ru` maps. Each map uses decimal item IDs or references such as `fish:0` and `dlc:25` as keys, with `[name, description]` as values.
+
+To extract the supported menu and inventory art from your own installation for local use, run:
+
+```powershell
+python game_art.py "C:\Program Files (x86)\Steam\steamapps\common\Trails of Cold Steel" "C:\Tools\SenPatcher.exe"
+```
+
+The importer handles the menu, standard items, master quartz, game logo and Blade cards. The full-theme build also needs the local background, banner, emblem and supplemental artwork listed in [build_preview.py](build_preview.py). The Russian item-text source used during local development is credited to [Zeru and the Sen no Kiseki translation project](https://steamcommunity.com/sharedfiles/filedetails/?id=2169950170).
+
+## Build and test
+
+Use 64-bit Python 3.14 on Windows.
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\Run_Editor.bat
+.\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
+.\.venv\Scripts\python.exe -m unittest discover -v
+.\.venv\Scripts\python.exe build_preview.py --without-assets
+.\.venv\Scripts\python.exe package_release.py --without-assets --tag v1.0.0
 ```
 
-При запуске приложение ищет игру в стандартной папке Steam. Для другого расположения выберите папку с `ed8.exe` на экране первого запуска или через «Инструменты». Слоты Steam обычно находятся в `Saved Games/Falcom/ed8`. После ручного открытия редактор запоминает папку слота.
+Omit `--without-assets` from both build and packaging commands for a full local build with the complete asset set. Installed-game UI tests run when the standard Steam installation is present. The Windows workflow also tests the GUI with synthetic records and starts the packaged executable without a game installation.
 
-- **F5** открывает последний совместимый слот в выбранной папке.
-- **Ctrl+O** открывает диалог выбора файла `.dat` или `.bak`.
-- **Ctrl+F** переводит фокус на поиск в каталоге.
-- **Ctrl+Z** отменяет последнюю правку.
-- **Ctrl+S** сохраняет отдельную копию в новый файл `.dat`.
+## License and credits
 
-Кнопка **«Записать с резервной копией»** показывает список применённых правок перед перезаписью. Закройте игру перед записью в её папку сохранений. Открытую резервную копию можно сохранить через **«Сохранить копию…»** в новый файл `.dat`.
-
-Параметр `--save "путь\к\слоту.dat"` открывает указанный файл при запуске. Параметр `--demo` запускает учебный режим.
-
-## Оформление
-
-Иконки предметов, мастер-кварцев и меню извлекаются из `I_SYSTEM.pkg` первой игры. Импорт также берёт логотип из установки и фоновую иллюстрацию из локального кэша Steam.
-
-```powershell
-.\.venv\Scripts\python.exe game_art.py "C:\Program Files (x86)\Steam\steamapps\common\Trails of Cold Steel" "C:\Tools\SenPatcher.exe"
-```
-
-Папка `assets` локальная. Для баннера используется [иллюстрация Тристы](https://www.falcom.co.jp/sen/world/show/ss11_l.jpg) под именем `academy-full.jpg`. [Эмблема Торса с сайта первой игры](https://www.falcom.co.jp/sen/world/keyword01.html) сохранена как `thors.png`. Если эмблема отсутствует, редактор показывает надпись «THORS». Условия использования перенесённого кода интерфейса приведены в [LICENSE](LICENSE).
-
-## Проверки и локальная сборка
-
-```powershell
-.\.venv\Scripts\python.exe -m unittest -v
-.\Run_Editor.bat --smoke-test
-```
-
-Локальную сборку можно повторить из среды с PyInstaller и PySide6. Скрипт собирает приложение с изолированным путём поиска DLL и помещает результат в `dist`.
-
-```powershell
-python build_preview.py
-```
-
-## Работа с файлами
-
-`SteamSaveStorage` подключает проверку формата, чтение слотов и запись инвентаря с резервной копией. При записи меняется только блок инвентаря. Данные экипировки, метаданные списка слотов и миниатюры игра хранит отдельно от редактируемого блока.
+The editor code is distributed under the [MIT license](LICENSE). It builds on the [Cold Steel IV](https://github.com/Sqzzzzzzz/Cold-Steel-IV-Save-Editor) interface and earlier [Cold Steel III](https://github.com/Sqzzzzzzz/Cold-Steel-3-Inventory-Editor-RU-ENG-) editor work. Game artwork, text and trademarks belong to their respective owners. This is a fan project unaffiliated with Nihon Falcom, XSEED Games and Valve. See [third-party notices](third_party/README.md) for the runtime libraries.

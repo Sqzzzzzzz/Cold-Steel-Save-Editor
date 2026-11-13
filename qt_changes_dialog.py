@@ -26,7 +26,7 @@ class ChangesDialog(QDialog):
             f'Added: {counts["added"]}   ·   Removed: {counts["removed"]}   ·   Modified: {counts["modified"]}'))
         layout.addWidget(self.summary)
         if save_mode:
-            action=t('Отдельная копия исходного файла','Separate copy of the source file') if save_mode=='copy' else t('Перезапись с резервной копией','Overwrite with a backup')
+            action=t('Сохранение отдельной копии','Save a separate copy') if save_mode=='copy' else t('Перезапись с резервной копией','Overwrite with a backup')
             self.destination=QLabel(action+' · '+(source.name if source else t('Предпросмотр','Preview')))
             if source:
                 self.destination.setToolTip(str(source))
@@ -45,7 +45,7 @@ class ChangesDialog(QDialog):
             name=window.core.item_name(change.item_id)
             item=QTableWidgetItem(name);item.setToolTip(name)
             item.setData(Qt.ItemDataRole.UserRole,change.item_id)
-            item.setIcon(window._icon(change.item_id,window.core.catalog.get(change.item_id,{})))
+            item.setIcon(window._icon(change.item_id))
             self.table.setItem(row,0,item)
             action={'added':t('Добавление','Add'),'removed':t('Удаление','Remove'),'modified':t('Количество','Quantity')}[change.kind]
             for col,text in enumerate((str(change.item_id),str(change.before),str(change.after),action),1):
@@ -53,8 +53,7 @@ class ChangesDialog(QDialog):
                 if col in (3,4):cell.setForeground(QColor('#F5A8B5') if change.kind=='removed' else QColor('#F0DDE0'))
                 self.table.setItem(row,col,cell)
         layout.addWidget(self.table,1)
-        if data.reordered:note=t('Также изменён порядок предметов в слотах.','The item order in the save slots also changed.')
-        elif not data.changes:note=t('Несохранённых изменений нет.','No unsaved changes.')
+        if not data.changes:note=t('Несохранённых изменений нет.','No unsaved changes.')
         else:note=t('Показаны все правки, включая предметы за пределами текущего фильтра.','All changes are shown, including items outside the current filter.')
         if save_mode and source is None:
             note += '\n' + t('Запись игровых файлов недоступна в учебном режиме.',
@@ -63,7 +62,7 @@ class ChangesDialog(QDialog):
             note += '\n' + t('Перед записью рядом с файлом будет создана резервная копия .bak.',
                               'A .bak backup will be created next to the file before writing.')
         if window.has_pending_quantity():
-            note+='\n'+t(f'Ввод количества для «{window.core.item_name(window.active_item_id)}» ещё не применён.',
+            note+='\n'+t(f'Новое количество для предмета «{window.core.item_name(window.active_item_id)}» ещё не применено.',
                          f'The typed quantity for “{window.core.item_name(window.active_item_id)}” has not been applied.')
         self.note=QLabel(note);self.note.setWordWrap(True);self.note.setObjectName('reviewNote');layout.addWidget(self.note)
         buttons=QHBoxLayout();buttons.addStretch(1)
@@ -71,7 +70,7 @@ class ChangesDialog(QDialog):
         self.back.clicked.connect(self.reject);buttons.addWidget(self.back)
         self.proceed=None
         if save_mode:
-            self.proceed=HudButton(t('Сохранить копию…','Save a copy…') if save_mode=='copy' else t('Записать с копией','Save with a backup'))
+            self.proceed=HudButton(t('Сохранить копию…','Save a copy…') if save_mode=='copy' else t('Записать с резервной копией','Save with a backup'))
             self.proceed.setProperty('role','primary');self.proceed.setIcon(hud_icon('check'))
             self.proceed.setFixedSize(240,46)
             self.proceed.setEnabled(bool(source and (save_mode == 'copy' or source.suffix.lower() == '.dat')))

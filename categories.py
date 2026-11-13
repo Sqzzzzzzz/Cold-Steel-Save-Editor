@@ -1,4 +1,4 @@
-"""Category tree inherited from the Cold Steel IV interface."""
+"""Categories used by the Cold Steel I catalog and inventory."""
 from __future__ import annotations
 from collections import OrderedDict
 
@@ -8,9 +8,9 @@ GROUPS = OrderedDict([
     ('equipment', ('Снаряжение', [('weapon','Оружие'),('armor','Броня'),('shoes','Обувь'),('accessory','Аксессуары')])),
     ('consumables', ('Расходники и еда', [('consumable','Лечение и бой'),('food','Готовые блюда'),('ingredient','Ингредиенты')])),
     ('library', ('Книги и рецепты', [('recipe','Рецепты'),('book','Книги и журналы')])),
-    ('cosmetics', ('Внешний вид', [('costume','Костюмы'),('face','Аксессуары образа'),('hair','Причёски'),('decoration','Декор и раскраски')])),
-    ('fishing', ('Рыбалка', [('fish','Рыба'),('fishing_gear','Удочки и снасти')])),
-    ('special', ('Другие предметы', [('quest','Сюжетные и ключевые'),('material','Материалы и сепит'),('card','Карты и мини-игры'),('orbment','Сферы и улучшения'),('other','Прочее')])),
+    ('cosmetics', ('Внешний вид', [('costume','Костюмы'),('face','Аксессуары образа'),('decoration','Корпуса АРКУСа')])),
+    ('fishing', ('Рыбалка', [('fish','Рыба'),('fishing_gear','Удочки и снасти'),('fish_book','Журналы рыбалки')])),
+    ('special', ('Другие предметы', [('quest','Ключевые предметы'),('material','Материалы и сепит'),('card','Предметы мини-игр'),('orbment','Сюжетные сферы'),('dlc_pack','Наборы дополнений'),('other','Прочее')])),
 ])
 
 CATEGORY_TO_GROUP = {
