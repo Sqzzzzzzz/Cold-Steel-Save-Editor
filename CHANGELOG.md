@@ -2,6 +2,7 @@
 
 ## 1.0.2
 
+- Fix opening New Game Plus saves with a populated second inventory block. Edits preserve the second block byte for byte.
 - Add Russian and English reference descriptions for sepith and notebook entries.
 - Correct mixed-language text, typos and inconsistent item stat descriptions.
 - Report missing descriptions and recover same-language text from the bundled or installed catalog.

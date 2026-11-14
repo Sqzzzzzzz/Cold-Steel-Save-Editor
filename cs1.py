@@ -13,9 +13,10 @@ from item_catalog import CatalogItem, EMPTY_ID, read_catalog
 SAVE_SIZE = 460992
 SAVE_HEADER = bytes.fromhex("c0 08 07 00 08 00 00 00")
 INVENTORY_OFFSET = 0x40C24
-SLOTS = 4096
+SLOTS = 2048
 RECORD = Struct("<HH32s")
 INVENTORY_END = INVENTORY_OFFSET + SLOTS * RECORD.size
+SECOND_INVENTORY_END = INVENTORY_END + SLOTS * RECORD.size
 EMPTY_EXTRA = bytes(32)
 EMPTY_RECORD = RECORD.pack(EMPTY_ID, 0, EMPTY_EXTRA)
 EMPTY_INVENTORY = EMPTY_RECORD * SLOTS
@@ -24,24 +25,31 @@ ORBMENT_SLOTS = 16
 ORBMENT_SIZE = 18
 
 
+def _read_inventory_block(data: bytes, start: int, end: int) -> dict[int, int]:
+    items = {}
+    inventory = memoryview(data)[start:end]
+    for slot, (item_id, quantity, extra) in enumerate(RECORD.iter_unpack(inventory)):
+        if item_id == EMPTY_ID:
+            offset = slot * RECORD.size
+            if not data.endswith(EMPTY_INVENTORY[offset:], start, end):
+                raise ValueError("Unrecognized inventory record in the save.")
+            break
+        if not 1 <= quantity <= 99 or extra != EMPTY_EXTRA:
+            raise ValueError("Unrecognized inventory record in the save.")
+        if item_id in items:
+            raise ValueError(f"Duplicate inventory ID {item_id:04X} in the save.")
+        items[item_id] = quantity
+    return items
+
+
 class Save:
     def __init__(self, data: bytes):
         if len(data) != SAVE_SIZE or not data.startswith(SAVE_HEADER):
             raise ValueError("Expected a Cold Steel I XSEED PC save (460,992 bytes, version 8).")
 
-        items = {}
-        inventory = memoryview(data)[INVENTORY_OFFSET:INVENTORY_END]
-        for slot, (item_id, quantity, extra) in enumerate(RECORD.iter_unpack(inventory)):
-            if item_id == EMPTY_ID:
-                offset = slot * RECORD.size
-                if not data.endswith(EMPTY_INVENTORY[offset:], INVENTORY_OFFSET, INVENTORY_END):
-                    raise ValueError("Unrecognized inventory record in the save.")
-                break
-            if not 1 <= quantity <= 99 or extra != EMPTY_EXTRA:
-                raise ValueError("Unrecognized inventory record in the save.")
-            if item_id in items:
-                raise ValueError(f"Duplicate inventory ID {item_id:04X} in the save.")
-            items[item_id] = quantity
+        items = _read_inventory_block(data, INVENTORY_OFFSET, INVENTORY_END)
+        # NG+ saves can populate the second block independently of the active inventory.
+        _read_inventory_block(data, INVENTORY_END, SECOND_INVENTORY_END)
 
         self.original = data
         self.original_items = items

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from cs1 import (
     CatalogItem, EMPTY_RECORD, INVENTORY_END, INVENTORY_OFFSET, ORBMENTS_OFFSET,
-    RECORD, SAVE_HEADER, SAVE_SIZE, SLOTS, Save, publish_new, read_catalog,
+    RECORD, SAVE_HEADER, SAVE_SIZE, SECOND_INVENTORY_END, SLOTS, Save, publish_new, read_catalog,
     replace_with_backup,
 )
 from save_storage import SteamSaveStorage
@@ -26,6 +26,7 @@ def make_save(*items: tuple[int, int]) -> bytes:
         b"".join(RECORD.pack(item_id, quantity, bytes(32)) for item_id, quantity in items)
         + EMPTY_RECORD * (SLOTS - len(items))
     )
+    data[INVENTORY_END:SECOND_INVENTORY_END] = EMPTY_RECORD * SLOTS
     data[-4:] = b"tail"
     return bytes(data)
 
@@ -68,6 +69,31 @@ class SaveTests(TestCase):
         for data in (bytes(SAVE_SIZE), make_save((0, 1), (0, 2)), make_save((9999, 0), (0, 1))):
             with self.subTest(header=data[:8]), self.assertRaises(ValueError):
                 Save(data)
+
+    def test_rejects_invalid_records_in_the_second_inventory_block(self):
+        item = RECORD.pack(0, 7, bytes(32))
+        for records, error in (
+            (EMPTY_RECORD + item, "Unrecognized inventory record"),
+            (RECORD.pack(0, 0, bytes(32)), "Unrecognized inventory record"),
+            (item + item, "Duplicate inventory ID"),
+        ):
+            with self.subTest(error=error, records=len(records)):
+                data = bytearray(make_save((0, 2)))
+                data[INVENTORY_END:INVENTORY_END + len(records)] = records
+                with self.assertRaisesRegex(ValueError, error):
+                    Save(bytes(data))
+
+    def test_full_active_inventory_cannot_extend_into_the_second_block(self):
+        source = bytearray(make_save(*((item_id, 1) for item_id in range(SLOTS))))
+        source[INVENTORY_END:INVENTORY_END + RECORD.size] = RECORD.pack(0, 9, bytes(32))
+        original = bytes(source)
+        save = Save(original)
+        with self.assertRaisesRegex(ValueError, "no free slots"):
+            save.set_quantity(SLOTS, 1, POTION)
+        save.set_quantity(SLOTS - 1, 2, POTION)
+        edited = save.edited_bytes()
+        self.assertEqual(edited[INVENTORY_END:], original[INVENTORY_END:])
+        self.assertEqual(Save(edited).items[SLOTS - 1], 2)
 
     def test_writes_backup_and_refuses_to_overwrite_newer_source(self):
         original = make_save((0, 2))
@@ -200,6 +226,36 @@ class SteamStorageTests(TestCase):
             session = SteamSaveStorage().latest(root)
             self.assertEqual(session.source, latest.resolve())
             self.assertEqual(session.quantities, {0: 2})
+
+    def test_new_game_plus_save_operations_preserve_the_second_block(self):
+        data = bytearray(make_save((0, 2), (1, 3)))
+        second_block = RECORD.pack(0, 9, bytes(32)) + RECORD.pack(8, 7, bytes(32))
+        data[INVENTORY_END:INVENTORY_END + len(second_block)] = second_block
+        original = bytes(data)
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "save001.dat"
+            source.write_bytes(original)
+            storage = SteamSaveStorage()
+
+            session = storage.latest(root)
+            self.assertEqual(session.quantities, {0: 2, 1: 3})
+            self.assertEqual(session.capacity, 2048)
+            unchanged = storage.save_copy(session, root / "unchanged.dat", {})
+            self.assertEqual(unchanged.read_bytes(), original)
+
+            session.quantities = {0: 5, 8: 4}
+            catalog = dict.fromkeys((0, 1, 8), POTION)
+            edited_copy = storage.save_copy(session, root / "edited.dat", catalog)
+            self.assertEqual(source.read_bytes(), original)
+            updated, backup = storage.overwrite(session, catalog)
+            self.assertEqual(updated.quantities, {0: 5, 8: 4})
+            self.assertEqual(backup.read_bytes(), original)
+            for path in (edited_copy, source):
+                edited = path.read_bytes()
+                self.assertEqual(edited[:INVENTORY_OFFSET], original[:INVENTORY_OFFSET])
+                self.assertEqual(edited[INVENTORY_END:], original[INVENTORY_END:])
+                self.assertEqual(storage.read(path).quantities, {0: 5, 8: 4})
 
     def test_backup_can_be_restored_as_a_new_slot_without_mutating_it(self):
         original = make_save((0, 2), (60000, 8))

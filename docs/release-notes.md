@@ -2,6 +2,9 @@
 
 ## What's new
 
+- Fixed an error that prevented some New Game Plus saves from opening ([issue #1](https://github.com/Sqzzzzzzz/Cold-Steel-Save-Editor/issues/1)).
+- Inventory edits preserve the second inventory block byte for byte. The fix was tested on copies of New Game Plus and regular Steam saves.
+- Исправлена ошибка при загрузке сохранений из «Новой игры+». При записи второй блок инвентаря сохраняется побайтно.
 - Added Russian and English reference descriptions for sepith and notebook entries.
 - Corrected item descriptions and stats in both languages, including remaining English text in Russian descriptions.
 - The translation report now includes missing descriptions.
